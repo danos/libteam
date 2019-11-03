@@ -1,0 +1,94 @@
+--- a/libteamdctl/cli_zmq.c
++++ b/libteamdctl/cli_zmq.c
+@@ -76,7 +76,7 @@
+ 	free(data);
+ }
+ 
+-static int cli_zmq_send(void *sock, char *buf)
++static int cli_zmq_send(struct teamdctl *tdc, void *sock, char *buf)
+ {
+ 	int ret;
+ 	int buflen = strlen(buf);
+@@ -84,28 +84,28 @@
+ 	ret = zmq_send(sock, buf, buflen, 0);
+ 
+ 	if (ret == -1) {
+-		teamd_log_warn("zmq: send failed: %s", strerror(errno));
++		warn(tdc, "zmq: send failed: %s", strerror(errno));
+ 		return -errno;
+ 	}
+ 	free(buf);
+ 	return 0;
+ }
+ 
+-static int cli_zmq_recv(void *sock, char **p_str)
++static int cli_zmq_recv(struct teamdctl *tdc, void *sock, char **p_str)
+ {
+ 	int ret;
+ 	zmq_msg_t msg;
+ 	char *buf;
+ 
+ 	if (zmq_msg_init(&msg) == -1) {
+-		teamd_log_dbg("zmq: Unable initiate message for receive.");
++		dbg(tdc, "zmq: Unable initiate message for receive.");
+ 		return -errno;
+ 	}
+ 
+ 	ret = zmq_msg_recv(&msg, sock, 0);
+ 
+ 	if (ret == -1) {
+-		teamd_log_warn("zmq: send failed: %s", strerror(errno));
++		warn(tdc, "zmq: send failed: %s", strerror(errno));
+ 		return -errno;
+ 	}
+ 
+@@ -115,7 +115,7 @@
+ 
+ 	if (zmq_msg_close(&msg) == -1) {
+ 		free(buf);
+-		teamd_log_dbg("zmq: Unable close message.");
++		dbg(tdc, "zmq: Unable close message.");
+ 		return -errno;
+ 	}
+ 
+@@ -172,11 +172,11 @@
+ 		}
+ 	}
+ 
+-	err = cli_zmq_send(cli_zmq->sock, msg);
++	err = cli_zmq_send(tdc, cli_zmq->sock, msg);
+ 	if (err)
+ 		goto send_err;
+ 
+-	err = cli_zmq_recv(cli_zmq->sock, &recvmsg);
++	err = cli_zmq_recv(tdc, cli_zmq->sock, &recvmsg);
+ 	if (err)
+ 		goto send_err;
+ 
+@@ -212,13 +212,13 @@
+ 
+ 	context = zmq_ctx_new();
+ 	if (!context) {
+-		teamd_log_err("zmq: Failed to create context.");
++		err(tdc, "zmq: Failed to create context.");
+ 		return -errno;
+ 	}
+ 
+ 	sock = zmq_socket(context, ZMQ_REQ);
+ 	if (!sock) {
+-		teamd_log_err("zmq: Failed to create socket.");
++		err(tdc, "zmq: Failed to create socket.");
+ 		return -errno;
+ 	}
+ 
+--- a/teamd/teamd_zmq_common.h
++++ b/teamd/teamd_zmq_common.h
+@@ -25,8 +25,6 @@
+ #include <sys/ioctl.h>
+ #include <linux/sockios.h>
+ 
+-#include "teamd.h"
+-
+ #define TEAMD_ZMQ_REQUEST_PREFIX	"REQUEST"
+ #define TEAMD_ZMQ_REPLY_ERR_PREFIX	"REPLY_ERROR"
+ #define TEAMD_ZMQ_REPLY_SUCC_PREFIX	"REPLY_SUCCESS"

@@ -1,0 +1,69 @@
+Subject: refactor lacpdu_recv in preparation for dataplane integration
+
+  Separate reception and processing of LACPDUs so that the processing
+  code can later be called for packets arriving by some method other
+  than PF_PACKET sockets.
+
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1023,26 +1023,20 @@
+ 	return err;
+ }
+ 
+-static int lacpdu_recv(struct lacp_port *lacp_port)
++static int lacpdu_process(struct lacp_port *lacp_port, struct lacpdu *lacpdu,
++                          struct sockaddr_ll *ll_from)
+ {
+-	struct lacpdu lacpdu;
+-	struct sockaddr_ll ll_from;
+ 	int err;
+ 
+-	err = teamd_recvfrom(lacp_port->sock, &lacpdu, sizeof(lacpdu), 0,
+-			     (struct sockaddr *) &ll_from, sizeof(ll_from));
+-	if (err <= 0)
+-		return err;
+-
+-	if (!lacpdu_check(&lacpdu)) {
++	if (!lacpdu_check(lacpdu)) {
+ 		teamd_log_warn("malformed LACP PDU came.");
+ 		return 0;
+ 	}
+ 
+ 	/* Check if we have correct info about the other side */
+-	if (memcmp(&lacpdu.actor, &lacp_port->partner,
++	if (memcmp(&lacpdu->actor, &lacp_port->partner,
+ 		   sizeof(struct lacpdu_info))) {
+-		lacp_port->partner = lacpdu.actor;
++		lacp_port->partner = lacpdu->actor;
+ 		err = lacp_port_partner_update(lacp_port);
+ 		if (err)
+ 			return err;
+@@ -1056,7 +1050,7 @@
+ 		return err;
+ 
+ 	/* Check if the other side has correct info about us */
+-	if (memcmp(&lacpdu.partner, &lacp_port->actor,
++	if (memcmp(&lacpdu->partner, &lacp_port->actor,
+ 		   sizeof(struct lacpdu_info))) {
+ 		err = lacpdu_send(lacp_port);
+ 		if (err)
+@@ -1071,6 +1065,19 @@
+ 	return 0;
+ }
+ 
++static int lacpdu_recv(struct lacp_port *lacp_port) {
++	struct lacpdu lacpdu;
++	struct sockaddr_ll ll_from;
++	int err;
++
++	err = teamd_recvfrom(lacp_port->sock, &lacpdu, sizeof(lacpdu), 0,
++			     (struct sockaddr *) &ll_from, sizeof(ll_from));
++	if (err <= 0)
++		return err;
++
++	return lacpdu_process(lacp_port, &lacpdu, &ll_from);
++}
++
+ static int lacp_callback_timeout(struct teamd_context *ctx, int events,
+ 				 void *priv)
+ {

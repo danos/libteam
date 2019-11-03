@@ -1,0 +1,124 @@
+Subject: Handle mtu changes of bond device
+
+This patch adds support for handling of nl mtu changes.
+
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1392,12 +1392,36 @@
+ 	return lacp_port_link_update(lacp_port);
+ }
+ 
++static int lacp_event_watch_mtu_changed(struct teamd_context *ctx,
++					 uint32_t mtu, void *priv)
++{
++	struct lacp *lacp = priv;
++	struct teamd_port *tdport;
++	int err;
++
++	ctx->mtu = mtu;
++
++	teamd_for_each_tdport(tdport, ctx) {
++		struct lacp_port *lacp_port = lacp_port_get(lacp, tdport);
++		enum lacp_port_state state = lacp_port_get_state(lacp_port);
++
++		if (state == PORT_STATE_DEFAULTED || state == PORT_STATE_EXPIRED)
++			continue;
++
++		err = lacp_port_set_state(lacp_port, PORT_STATE_EXPIRED);
++		if (err)
++			return(err);
++	}
++	return 0;
++}
++
+ static const struct teamd_event_watch_ops lacp_port_watch_ops = {
+ 	.hwaddr_changed = lacp_event_watch_hwaddr_changed,
+ 	.link_changed = lacp_event_watch_link_changed,
+ 	.port_added = lacp_event_watch_port_added,
+ 	.port_removed = lacp_event_watch_port_removed,
+ 	.port_changed = lacp_event_watch_port_changed,
++	.mtu_changed = lacp_event_watch_mtu_changed,
+ };
+ 
+ static int lacp_carrier_init(struct teamd_context *ctx, struct lacp *lacp)
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -120,6 +120,7 @@
+ 	struct list_item		state_val_list;
+ 	uint32_t			ifindex;
+ 	struct team_ifinfo *		ifinfo;
++	uint32_t			mtu;
+ 	char *				hwaddr;
+ 	uint32_t			hwaddr_len;
+ 	bool				hwaddr_explicit;
+@@ -192,6 +193,8 @@
+ 				   struct teamd_port *tdport, void *priv);
+ 	int (*option_changed)(struct teamd_context *ctx,
+ 			      struct team_option *option, void *priv);
++	int (*mtu_changed)(struct teamd_context *ctx,
++			      struct team_option *option, void *priv);
+ 	char *option_changed_match_name;
+ };
+ 
+--- a/teamd/teamd_events.c
++++ b/teamd/teamd_events.c
+@@ -114,6 +114,22 @@
+ 	return 0;
+ }
+ 
++int teamd_event_mtu_changed(struct teamd_context *ctx,
++                                  uint32_t mtu)
++{
++	struct event_watch_item *watch;
++	int err;
++
++	list_for_each_node_entry(watch, &ctx->event_watch_list, list) {
++		if (!watch->ops->mtu_changed)
++			continue;
++		err = watch->ops->mtu_changed(ctx, mtu, watch->priv);
++		if (err)
++			return err;
++	}
++	return 0;
++}
++
+ int teamd_event_ifinfo_hwaddr_changed(struct teamd_context *ctx,
+ 				      struct team_ifinfo *ifinfo)
+ {
+--- a/teamd/teamd_lw_vplane.c
++++ b/teamd/teamd_lw_vplane.c
+@@ -26,6 +26,7 @@
+ 
+ struct lw_vplane_event {
+ 	char name[255];
++	uint32_t mtu;
+ 	bool up;
+ 	bool valid;
+ };
+@@ -66,6 +67,9 @@
+ 	if (tb[IFLA_IFNAME] == NULL)
+ 		return 0;
+ 
++	if (tb[IFLA_MTU])
++		event->mtu = nla_get_u32(tb[IFLA_MTU]);
++
+ 	if (ifi->ifi_flags & IFF_UP) {
+ 		if (!(ifi->ifi_flags & IFF_RUNNING))
+ 			event->up = false;
+@@ -102,8 +106,14 @@
+ 		if (rc)
+ 			goto vplane_cb_err;
+ 
+-		if (event.valid)
+-		rc = lw_vplane_link_state_change(ctx, event.name, event.up);
++		if (event.valid) {
++			if (event.mtu)
++				if (event.mtu != ctx->mtu &&
++				    !strcmp(event.name, ctx->team_devname))
++					teamd_event_mtu_changed(ctx, event.mtu);
++
++			rc = lw_vplane_link_state_change(ctx, event.name, event.up);
++		}
+ 	}
+ 
+ 	free(buf);

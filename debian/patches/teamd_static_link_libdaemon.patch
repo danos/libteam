@@ -1,0 +1,12 @@
+--- a/teamd/Makefile.am
++++ b/teamd/Makefile.am
+@@ -8,7 +8,8 @@
+ 
+ teamd_CFLAGS= $(LIBDAEMON_CFLAGS) $(JANSSON_CFLAGS) $(DBUS_CFLAGS) $(LIBNL_CFLAGS) -I${top_srcdir}/include -D_GNU_SOURCE
+ 
+-teamd_LDADD = $(top_builddir)/libteam/libteam.la $(LIBDAEMON_LIBS) $(JANSSON_LIBS) $(DBUS_LIBS) $(LIBNL_LIBS) $(ZMQ_LIBS) $(CZMQ_LIBS)
++teamd_LDFLAGS = -Wl,-Bstatic $(LIBDAEMON_LIBS) -Wl,-Bdynamic
++teamd_LDADD = $(top_builddir)/libteam/libteam.la $(JANSSON_LIBS) $(DBUS_LIBS) $(LIBNL_LIBS) $(ZMQ_LIBS) $(CZMQ_LIBS)
+ 
+ bin_PROGRAMS=teamd
+ teamd_SOURCES=teamd.c teamd_common.c teamd_json.c teamd_config.c teamd_state.c \

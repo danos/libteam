@@ -1,0 +1,29 @@
+lacp: handle port link change same as port change
+
+vplane link watcher invokes port_link_changed when slave interface
+changes state.
+Active/backup and balanced runners listen to port_link_changed, but
+lacp runner does not - it listens to port_changed event instead
+which includes link state (also speed and duplex) and comes from kernel.
+
+But kernel team driver does not notify port_changed event when
+slave interface goes into IF_OPER_DORMANT state - which is what controller
+sets it to when interface goes down.
+Kernel driver only accounts for admin state changes.
+
+Make lacp runner listen to port_link_changed events also and treat
+them same as a port change.
+---
+ teamd/teamd_runner_lacp.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1456,6 +1456,7 @@ static const struct teamd_event_watch_op
+ 	.port_added = lacp_event_watch_port_added,
+ 	.port_removed = lacp_event_watch_port_removed,
+ 	.port_changed = lacp_event_watch_port_changed,
++	.port_link_changed = lacp_event_watch_port_changed,
+ 	.port_master_changed = lacp_event_watch_port_master_changed,
+ 	.mtu_changed = lacp_event_watch_mtu_changed,
+ };

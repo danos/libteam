@@ -1,0 +1,81 @@
+Subject: Simple MUX state machine support
+
+This patch adds basic support for state transition from ATTACHED to
+COLLECTING_DISTRIBUTING as described in Figure 5-15 -- Mux machine state
+diagram (coupled control) of 802.1AX.
+
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -313,11 +313,18 @@ static bool lacp_port_selected(struct la
+ 	return lacp_port->agg_lead;
+ }
+ 
++static bool lacp_port_distributing(struct lacp_port *lacp_port)
++{
++	return !!(lacp_port->actor.state &
++		  (INFO_STATE_COLLECTING | INFO_STATE_DISTRIBUTING));
++}
++
+ static int lacp_port_should_be_enabled(struct lacp_port *lacp_port)
+ {
+ 	struct lacp *lacp = lacp_port->lacp;
+ 
+ 	if (lacp_port_selected(lacp_port) &&
++	    lacp_port_distributing(lacp_port) &&
+ 	    lacp_port->agg_lead == lacp->selected_agg_lead)
+ 		return true;
+ 	return false;
+@@ -328,6 +335,7 @@ static int lacp_port_should_be_disabled(
+ 	struct lacp *lacp = lacp_port->lacp;
+ 
+ 	if (!lacp_port_selected(lacp_port) ||
++	    !lacp_port_distributing(lacp_port) ||
+ 	    lacp_port->agg_lead != lacp->selected_agg_lead)
+ 		return true;
+ 	return false;
+@@ -891,17 +899,26 @@ static int lacp_port_actor_update(struct
+ 		state |= INFO_STATE_LACP_ACTIVITY;
+ 	if (lacp_port->lacp->cfg.fast_rate)
+ 		state |= INFO_STATE_LACP_TIMEOUT;
+-	if (lacp_port_selected(lacp_port))
++	if (lacp_port_selected(lacp_port)) {
+ 		state |= INFO_STATE_SYNCHRONIZATION;
+-	state |= INFO_STATE_COLLECTING | INFO_STATE_DISTRIBUTING;
++		if (lacp_port->partner.state & INFO_STATE_SYNCHRONIZATION) {
++			state |= INFO_STATE_COLLECTING |
++				INFO_STATE_DISTRIBUTING;
++		}
++	}
+ 	if (lacp_port->state == PORT_STATE_EXPIRED)
+ 		state |= INFO_STATE_EXPIRED;
+ 	if (lacp_port->state == PORT_STATE_DEFAULTED)
+ 		state |= INFO_STATE_DEFAULTED;
+ 	if (teamd_port_count(lacp_port->ctx) > 1)
+ 		state |= INFO_STATE_AGGREGATION;
++
++	if (lacp_port->actor.state == state)
++		return 0;
++
+ 	teamd_log_dbg("%s: lacp info state: 0x%02X.", lacp_port->tdport->ifname,
+ 						      state);
++
+ 	lacp_port->actor.state = state;
+ 	return lacpdu_send(lacp_port);
+ }
+@@ -912,7 +929,7 @@ static int lacp_port_set_state(struct la
+ 	int err;
+ 
+ 	if (new_state == lacp_port->state)
+-		return 0;
++		goto out;
+ 	if (new_state == PORT_STATE_DISABLED)
+ 		lacp_port_periodic_off(lacp_port);
+ 	else
+@@ -956,6 +973,7 @@ static int lacp_port_set_state(struct la
+ 		       lacp_port_state_name[new_state]);
+ 	lacp_port->state = new_state;
+ 
++ out:
+ 	err = lacp_port_agg_update(lacp_port);
+ 	if (err)
+ 		return err;

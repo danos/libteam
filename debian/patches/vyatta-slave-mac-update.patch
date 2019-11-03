@@ -1,0 +1,154 @@
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -195,6 +195,9 @@ struct teamd_event_watch_ops {
+ 			      struct team_option *option, void *priv);
+ 	int (*mtu_changed)(struct teamd_context *ctx,
+ 			      struct team_option *option, void *priv);
++	int (*port_master_changed)(struct teamd_context *ctx,
++				   struct teamd_port *tdport, void *priv);
++
+ 	char *option_changed_match_name;
+ };
+ 
+@@ -206,6 +209,8 @@ int teamd_event_port_changed(struct team
+ 			     struct teamd_port *tdport);
+ int teamd_event_port_link_changed(struct teamd_context *ctx,
+ 				  struct teamd_port *tdport);
++int teamd_event_ifinfo_port_master_changed(struct teamd_context *ctx,
++					   struct team_ifinfo *ifinfo);
+ int teamd_event_option_changed(struct teamd_context *ctx,
+ 			       struct team_option *option);
+ int teamd_event_ifinfo_hwaddr_changed(struct teamd_context *ctx,
+--- a/teamd/teamd_events.c
++++ b/teamd/teamd_events.c
+@@ -208,6 +208,32 @@ int teamd_event_ifinfo_ifi_flags_changed
+ 	return 0;
+ }
+ 
++int teamd_event_ifinfo_port_master_changed(struct teamd_context *ctx,
++					   struct team_ifinfo *ifinfo)
++{
++	struct event_watch_item *watch;
++	uint32_t ifindex = team_get_ifinfo_ifindex(ifinfo);
++	struct teamd_port *tdport = teamd_get_port(ctx, ifindex);
++	int err;
++
++	if (!tdport)
++		return 0;
++
++	/* ignore events for master interface */
++	if (ifindex == ctx->ifindex)
++		return 0;
++
++	list_for_each_node_entry(watch, &ctx->event_watch_list, list) {
++		if (watch->ops->port_master_changed) {
++			err = watch->ops->port_master_changed(ctx, tdport,
++							      watch->priv);
++			if (err)
++				return err;
++		}
++	}
++	return 0;
++}
++
+ int teamd_events_init(struct teamd_context *ctx)
+ {
+ 	list_init(&ctx->event_watch_list);
+--- a/teamd/teamd_ifinfo_watch.c
++++ b/teamd/teamd_ifinfo_watch.c
+@@ -59,6 +59,16 @@ static int ifinfo_change_handler_func(st
+ 			if (err)
+ 				return err;
+ 		}
++		if (ctx->ifinfo != ifinfo &&
++		    team_is_ifinfo_master_ifindex_changed(ifinfo)) {
++			/* slave's master ifindex was updated.  make sure its
++			   mac address matches the master's.
++			 */
++			err = teamd_event_ifinfo_port_master_changed(ctx,
++								     ifinfo);
++			if (err)
++				return err;
++		}
+ 	}
+ 	return 0;
+ }
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1404,6 +1404,29 @@ static int lacp_event_watch_port_changed
+ 	return lacp_port_link_update(lacp_port);
+ }
+ 
++static int lacp_event_watch_port_master_changed(struct teamd_context *ctx,
++						struct teamd_port *tdport,
++						void *priv)
++{
++	struct team_ifinfo *ifinfo = team_get_port_ifinfo(tdport->team_port);
++	char *port_hwaddr;
++	uint32_t port_hwaddr_len;
++
++	/* If the master ifindex was cleared, do nothing. */
++	if (team_get_ifinfo_master_ifindex(ifinfo) == 0)
++		return 0;
++
++	port_hwaddr = team_get_ifinfo_hwaddr(ifinfo);
++	port_hwaddr_len = team_get_ifinfo_hwaddr_len(ifinfo);
++
++	/* The port already has the correct hw address */
++	if (port_hwaddr_len == ctx->hwaddr_len &&
++	    memcmp(port_hwaddr, ctx->hwaddr, ctx->hwaddr_len) == 0)
++		return 0;
++
++	return lacp_port_set_mac(ctx, tdport);
++}
++
+ static int lacp_event_watch_mtu_changed(struct teamd_context *ctx,
+ 					 uint32_t mtu, void *priv)
+ {
+@@ -1433,6 +1456,7 @@ static const struct teamd_event_watch_op
+ 	.port_added = lacp_event_watch_port_added,
+ 	.port_removed = lacp_event_watch_port_removed,
+ 	.port_changed = lacp_event_watch_port_changed,
++	.port_master_changed = lacp_event_watch_port_master_changed,
+ 	.mtu_changed = lacp_event_watch_mtu_changed,
+ };
+ 
+--- a/teamd/teamd_runner_loadbalance.c
++++ b/teamd/teamd_runner_loadbalance.c
+@@ -78,11 +78,36 @@ static int lb_event_watch_hwaddr_changed
+ 	return 0;
+ }
+ 
++static int lb_event_watch_port_master_changed(struct teamd_context *ctx,
++					      struct teamd_port *tdport,
++					      void *priv)
++{
++	struct team_ifinfo *ifinfo = team_get_port_ifinfo(tdport->team_port);
++	char *port_hwaddr;
++	uint32_t port_hwaddr_len;
++
++	/* If the master ifindex was cleared, do nothing. */
++	if (team_get_ifinfo_master_ifindex(ifinfo) == 0)
++		return 0;
++
++	port_hwaddr = team_get_ifinfo_hwaddr(ifinfo);
++	port_hwaddr_len = team_get_ifinfo_hwaddr_len(ifinfo);
++
++	/* The port already has the correct hw address */
++	if (port_hwaddr_len == ctx->hwaddr_len &&
++	    memcmp(port_hwaddr, ctx->hwaddr, ctx->hwaddr_len) == 0)
++		return 0;
++
++	return team_hwaddr_set(ctx->th, tdport->ifindex, ctx->hwaddr,
++			       ctx->hwaddr_len);
++}
++
+ static const struct teamd_event_watch_ops lb_port_watch_ops = {
+ 	.hwaddr_changed = lb_event_watch_hwaddr_changed,
+ 	.port_added = lb_event_watch_port_added,
+ 	.port_removed = lb_event_watch_port_removed,
+ 	.port_link_changed = lb_event_watch_port_link_changed,
++	.port_master_changed = lb_event_watch_port_master_changed,
+ };
+ 
+ static int lb_init(struct teamd_context *ctx, void *priv)

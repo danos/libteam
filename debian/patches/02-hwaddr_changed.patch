@@ -1,0 +1,36 @@
+commit 01c1e7888cd9a78c53bef3bd8cf476ebe018fa31
+Author: Jiri Pirko <jiri@resnulli.us>
+Date:   Thu Mar 19 09:12:14 2015 +0100
+
+    teamd: do not change ctx->hwaddr pointer
+    
+    ctx->hwaddr is set to team_get_ifinfo_hwaddr(ctx->ifinfo) and it should
+    stay that way. Commit 4f75356a0919 changed ctx->hwaddr to
+    team_get_ifinfo_orig_hwaddr(tdport->team_ifinfo) which is incorrect.
+    After this change, hwaddr won't get updated.
+    
+    Now that we handle hwaddr change in lacp and mirror it to ports, we can
+    fix this by removing ctx->hwaddr set.
+    
+    Fixes: 4f75356a0919 ("teamd: update hwaddr when changing team's macaddr")
+    Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+
+--- a/teamd/teamd.c
++++ b/teamd/teamd.c
+@@ -855,7 +855,7 @@ static int teamd_add_ports(struct teamd_
+ static int teamd_hwaddr_check_change(struct teamd_context *ctx,
+ 				     struct teamd_port *tdport)
+ {
+-	char *hwaddr;
++	const char *hwaddr;
+ 	unsigned char hwaddr_len;
+ 	int err;
+ 
+@@ -873,7 +873,6 @@ static int teamd_hwaddr_check_change(str
+ 		teamd_log_err("Failed to set team device hardware address.");
+ 		return err;
+ 	}
+-	ctx->hwaddr = hwaddr;
+ 	return 0;
+ }
+ 

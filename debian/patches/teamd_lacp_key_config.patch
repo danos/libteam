@@ -1,0 +1,11 @@
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1173,7 +1173,7 @@ static int lacp_port_load_config(struct
+ 		      lacp_port->cfg.lacp_prio);
+ 
+ 	err = teamd_config_int_get(ctx, &tmp,
+-				   "$.ports.%s.lacp_key", port_name);
++				   "$.runner.lacp_key");
+ 	if (err) {
+ 		lacp_port->cfg.lacp_key = LACP_PORT_CFG_DFLT_LACP_KEY;
+ 	} else if (tmp < 0 || tmp > USHRT_MAX) {

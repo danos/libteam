@@ -1,0 +1,148 @@
+--- a/teamd/teamd_link_watch.c
++++ b/teamd/teamd_link_watch.c
+@@ -28,6 +28,7 @@
+ #include <time.h>
+ #include <private/misc.h>
+ #include <team.h>
++#include <linux/ethtool.h>
+ 
+ #include "teamd.h"
+ #include "teamd_config.h"
+@@ -163,6 +164,63 @@ static int teamd_link_watch_refresh_user
+ 	return 0;
+ }
+ 
++static
++int __teamd_get_port_int_state_val(struct teamd_context *ctx,
++				   struct teamd_port *tdport,
++				   char *subpath, int *outval)
++{
++	/* step through all of this port's link watchers until we find
++	 * one that can tell us the value we want
++	 */
++
++	struct lw_common_port_priv *common_ppriv;
++
++	teamd_for_each_port_priv_by_creator(common_ppriv, tdport,
++					    LW_PORT_PRIV_CREATOR_PRIV) {
++		unsigned int valno = 0;
++		const struct teamd_state_val *val;
++		struct team_state_gsc gsc;
++		int err;
++
++		while (valno < common_ppriv->link_watch->state_vg.vals_count) {
++			val = &common_ppriv->link_watch->state_vg.vals[valno];
++			/* include terminating null in string comparison */
++			if (!strncmp(val->subpath, subpath, strlen(subpath)+1)
++			    && val->type == TEAMD_STATE_ITEM_TYPE_INT) {
++				memset(&gsc, 0, sizeof(gsc));
++				gsc.info.tdport = tdport;
++				err = val->getter(ctx, &gsc, NULL);
++				if (!err) {
++					*outval = gsc.data.int_val;
++					return 0;
++				}
++			}
++			valno++;
++		}
++	}
++	return -1;
++}
++
++uint32_t teamd_get_port_speed(struct teamd_context *ctx,
++			      struct teamd_port *tdport)
++{
++	int speed;
++
++	if (__teamd_get_port_int_state_val(ctx, tdport, "speed", &speed) < 0)
++		return team_get_port_speed(tdport->team_port);
++	return (uint32_t)speed;
++}
++
++uint8_t teamd_get_port_duplex(struct teamd_context *ctx,
++			      struct teamd_port *tdport)
++{
++	int duplex;
++
++	if (__teamd_get_port_int_state_val(ctx, tdport, "duplex", &duplex) < 0)
++		return team_get_port_duplex(tdport->team_port);
++	return (uint8_t)(duplex & 0xff);
++}
++
+ static int link_watch_state_name_get(struct teamd_context *ctx,
+ 				     struct team_state_gsc *gsc,
+ 				     void *priv)
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -36,6 +36,7 @@
+ #include "teamd_config.h"
+ #include "teamd_state.h"
+ #include "teamd_workq.h"
++#include "teamd_link_watch.h"
+ 
+ /*
+  * Packet format for LACPDU described in
+@@ -484,7 +485,7 @@ static uint32_t lacp_get_agg_bandwidth(s
+ 	teamd_for_each_tdport(tdport, agg_lead->ctx) {
+ 		lacp_port = lacp_port_get(agg_lead->lacp, tdport);
+ 		if (lacp_port->agg_lead == agg_lead)
+-			speed += team_get_port_speed(tdport->team_port);
++			speed += teamd_get_port_speed(agg_lead->ctx, tdport);
+ 	}
+ 	return speed;
+ }
+@@ -993,8 +994,8 @@ static int lacp_port_link_update(struct
+ {
+ 	struct team_port *team_port = lacp_port->tdport->team_port;
+ 	bool linkup = team_is_port_link_up(team_port);
+-	uint32_t speed = team_get_port_speed(team_port);
+-	uint8_t duplex = team_get_port_duplex(team_port);
++	uint32_t speed = teamd_get_port_speed(lacp_port->ctx, lacp_port->tdport);
++	uint8_t duplex = teamd_get_port_duplex(lacp_port->ctx, lacp_port->tdport);
+ 	int err;
+ 
+ 	if (linkup != lacp_port->__link_last.up ||
+@@ -1340,8 +1341,8 @@ static int lacp_event_watch_link_changed
+     struct lacp_port *lacp_port = lacp_port_get(lacp, tdport);
+     struct team_port *team_port = lacp_port->tdport->team_port;
+ 
+-    uint32_t speed = team_get_port_speed(team_port);
+-    uint8_t duplex = team_get_port_duplex(team_port);
++    uint32_t speed = teamd_get_port_speed(ctx, lacp_port->tdport);
++    uint8_t duplex = teamd_get_port_duplex(ctx, lacp_port->tdport);
+ 
+     if (ctx->enabled != lacp_port->__link_last.up) {
+       /* If duplex is 0, meaning half-duplex, it should be set
+--- a/teamd/teamd_runner_activebackup.c
++++ b/teamd/teamd_runner_activebackup.c
+@@ -32,6 +32,7 @@
+ #include "teamd_config.h"
+ #include "teamd_state.h"
+ #include "teamd_workq.h"
++#include "teamd_link_watch.h"
+ 
+ struct ab;
+ 
+@@ -299,8 +300,8 @@ static void ab_best_port_check_set(struc
+ 	if (!teamd_link_watch_port_up(ctx, tdport) || best->tdport == tdport)
+ 		return;
+ 
+-	speed = team_get_port_speed(port);
+-	duplex = team_get_port_duplex(port);
++	speed = teamd_get_port_speed(ctx, tdport);
++	duplex = teamd_get_port_duplex(ctx, tdport);
+ 	prio = teamd_port_prio(ctx, tdport);
+ 
+ 	if (!best->tdport || (prio > best->prio) || (speed > best->speed) ||
+--- a/teamd/teamd_link_watch.h
++++ b/teamd/teamd_link_watch.h
+@@ -77,4 +77,9 @@ int lw_psr_state_missed_get(struct teamd
+ 			    struct team_state_gsc *gsc,
+ 			    void *priv);
+ 
++uint32_t teamd_get_port_speed(struct teamd_context *ctx,
++			      struct teamd_port *tdport);
++uint8_t teamd_get_port_duplex(struct teamd_context *ctx,
++			      struct teamd_port *tdport);
++
+ #endif

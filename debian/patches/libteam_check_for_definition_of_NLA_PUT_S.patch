@@ -1,0 +1,53 @@
+From 7bb674c854848debddf613a8d365ea3f56b232a5 Mon Sep 17 00:00:00 2001
+From: Jiri Pirko <jiri@resnulli.us>
+Date: Mon, 5 Oct 2015 14:48:33 +0200
+Subject: libteam: check for definition of NLA_PUT_S* separatelly
+
+Previous fix was not enough. Libnl does not define netlink types.
+
+Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+
+diff --git a/libteam/nl_updates.h b/libteam/nl_updates.h
+index 8f442a3..ae33b1e 100644
+--- a/libteam/nl_updates.h
++++ b/libteam/nl_updates.h
+@@ -28,6 +28,9 @@
+ 
+ #ifndef NLA_S8
+ #define NLA_S8 12
++#endif
++
++#ifndef NLA_PUT_S8
+ 
+ /**
+  * Add 8 bit signed integer attribute to netlink message.
+@@ -67,6 +70,9 @@ int8_t nla_get_s8(struct nlattr *nla)
+ 
+ #ifndef NLA_S16
+ #define NLA_S16 13
++#endif
++
++#ifndef NLA_PUT_S16
+ 
+ /**
+  * Add 16 bit signed integer attribute to netlink message.
+@@ -106,6 +112,9 @@ int16_t nla_get_s16(struct nlattr *nla)
+ 
+ #ifndef NLA_S32
+ #define NLA_S32 14
++#endif
++
++#ifndef NLA_PUT_S32
+ 
+ /**
+  * Add 32 bit signed integer attribute to netlink message.
+@@ -145,6 +154,9 @@ int32_t nla_get_s32(struct nlattr *nla)
+ 
+ #ifndef NLA_S64
+ #define NLA_S64 15
++#endif
++
++#ifndef NLA_PUT_S64
+ 
+ /**
+  * Add 64 bit signed integer attribute to netlink message.

@@ -1,0 +1,42 @@
+From 5b538c0ef22dd9e42513bf2c137e3efca24e807c Mon Sep 17 00:00:00 2001
+Message-Id: <5b538c0ef22dd9e42513bf2c137e3efca24e807c.1440773007.git.mleitner@redhat.com>
+From: Marcelo Ricardo Leitner <marcelo.leitner@gmail.com>
+Date: Thu, 27 Aug 2015 16:17:05 -0300
+Subject: [PATCH] libteamdctl: fix timeval value for select
+
+timeval.tv_usec shouldn't be bigger than 10^6, as then it overlaps
+.tv_sec.
+
+The fix is to normalize the fields regarding their resolutions.
+
+Fixes: 7824c18d65ab ("libteamdctl: increase usock timeout to 5secs")
+Reported-by: Vitezslav Humpa <vhumpa@redhat.com>
+Signed-off-by: Marcelo Ricardo Leitner <marcelo.leitner@gmail.com>
+Acked-by: Flavio Leitner <fbl@sysclose.org>
+Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+Signed-off-by: Marcelo Ricardo Leitner <mleitner@redhat.com>
+---
+ libteamdctl/cli_usock.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+--- a/libteamdctl/cli_usock.c
++++ b/libteamdctl/cli_usock.c
+@@ -77,7 +77,8 @@
+ 	return 0;
+ }
+ 
+-#define WAIT_USEC (TEAMDCTL_REPLY_TIMEOUT * 1000)
++#define WAIT_SEC (TEAMDCTL_REPLY_TIMEOUT / 1000)
++#define WAIT_USEC (TEAMDCTL_REPLY_TIMEOUT % 1000 * 1000)
+ 
+ static int cli_usock_wait_recv(int sock)
+ {
+@@ -86,7 +87,7 @@
+ 	int ret;
+ 	struct timeval tv;
+ 
+-	tv.tv_sec = 0;
++	tv.tv_sec = WAIT_SEC;
+ 	tv.tv_usec = WAIT_USEC;
+ 	FD_ZERO(&rfds);
+ 	FD_SET(sock, &rfds);

@@ -1,0 +1,26 @@
+From: Jan Blunck <jblunck@infradead.org>
+Subject: Update team_info orig_hwaddr when freed from master
+
+Signed-off-by: Jan Blunck <jblunck@infradead.org>
+
+--- a/libteam/ifinfo.c
++++ b/libteam/ifinfo.c
+@@ -122,6 +122,18 @@ static void update_master(struct team_if
+ 		ifinfo->master_ifindex = master_ifindex;
+ 		set_changed(ifinfo, CHANGED_MASTER_IFINDEX);
+ 	}
++
++	/*
++	 * If the interface was enslaved while the initial update_hwaddr()
++	 * run the orig_hwaddr is still unset. It is ok to sync the orig_hwaddr
++	 * now even if its not the "real" orig_hwaddr because another hwaddr
++	 * update will follow in that case.
++	 */
++	if (!ifinfo->master_ifindex && ifinfo->orig_hwaddr_len == 0) {
++		ifinfo->orig_hwaddr_len = ifinfo->hwaddr_len;
++		memcpy(ifinfo->orig_hwaddr, ifinfo->hwaddr,
++		       ifinfo->hwaddr_len);
++	}
+ }
+ 
+ static void update_phys_port_id(struct team_ifinfo *ifinfo,

@@ -1,0 +1,16 @@
+Subject: Move teamd exit message to loglevel INFO
+
+The teamd exit message is printed too when restarting teamd. This spams
+/var/log/messages with unnecessary errors.
+
+--- a/teamd/teamd.c
++++ b/teamd/teamd.c
+@@ -690,7 +690,7 @@ static int callback_daemon_signal(struct
+ 	case SIGINT:
+ 	case SIGQUIT:
+ 	case SIGTERM:
+-		teamd_log_warn("Got SIGINT, SIGQUIT or SIGTERM.");
++		teamd_log_info("Got SIGINT, SIGQUIT or SIGTERM.");
+ 		teamd_run_loop_quit(ctx, 0);
+ 		break;
+ 	}

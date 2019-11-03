@@ -1,0 +1,35 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+%:
+	dh $@ --with autoreconf
+
+override_dh_auto_configure:
+	#./autogen.sh
+	dh_auto_configure -- \
+                          --disable-silent-rules \
+                          --enable-static=no
+
+override_dh_auto_install:
+	dh_auto_install --destdir=$(CURDIR)/debian/tmp
+
+override_dh_builddeb:
+	dh_builddeb -- -Zxz
+
+## http://wiki.debian.org/onlyjob/get-orig-source
+PKD  = $(abspath $(dir $(MAKEFILE_LIST)))
+PKG  = $(word 2,$(shell dpkg-parsechangelog -l$(PKD)/changelog | grep ^Source))
+VER ?= $(shell dpkg-parsechangelog -l$(PKD)/changelog | perl -ne 'print $$1 if m{^Version:\s+(?:\d+:)?(\d.*)(?:\-\d+.*)};')
+.PHONY: get-orig-source
+get-orig-source:  $(info I: $(PKG)_$(VER))
+	@echo "# Downloading..."
+	uscan --noconf --verbose --rename --destdir=$(CURDIR) --check-dirname-level=0 --force-download --download-version $(VER) $(PKD)
+
+.PHONY: override_dh_strip
+override_dh_strip:
+	dh_strip -plibteam5 --dbg-package=libteam-dbg
+	dh_strip -plibteamdctl0 --dbg-package=libteam-dbg
+	dh_strip -plibteam-utils --dbg-package=libteam-dbg

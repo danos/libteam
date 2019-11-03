@@ -1,0 +1,259 @@
+Subject: Handle IFF_UP & IFF_RUNNING changes of bond device
+
+This patch adds support for handling of some ifi_flags changes. The runner
+is free to take action if the bond link itself changes.
+
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -1024,6 +1024,9 @@ static int lacpdu_send(struct lacp_port
+ 	struct sockaddr_ll ll_slow;
+ 	int err;
+ 
++	if (! lacp_port->ctx->enabled)
++		return 0;
++
+ 	err = teamd_getsockname_hwaddr(lacp_port->sock, &ll_my, 0);
+ 	if (err)
+ 		return err;
+@@ -1315,6 +1318,51 @@ static int lacp_event_watch_hwaddr_chang
+ 	return 0;
+ }
+ 
++static int lacp_event_watch_link_changed(struct teamd_context *ctx,
++					   void *priv)
++{
++  struct lacp *lacp = priv;
++  struct teamd_port *tdport;
++  int err;
++
++  teamd_for_each_tdport(tdport, ctx) {
++    struct lacp_port *lacp_port = lacp_port_get(lacp, tdport);
++    struct team_port *team_port = lacp_port->tdport->team_port;
++
++    uint32_t speed = team_get_port_speed(team_port);
++    uint8_t duplex = team_get_port_duplex(team_port);
++
++    if (ctx->enabled != lacp_port->__link_last.up) {
++      /* If duplex is 0, meaning half-duplex, it should be set
++       * to disabled state. However some drivers, like virtio_net
++       * does not report speed and duplex. In that case, kernel
++       * will provide speed == 0 and duplex == 0. If that is the
++       * case now, do not set disabled state and allow such devices
++       * to work properly.
++       */
++      if (ctx->enabled && (!duplex == !speed)) {
++	teamd_loop_callback_enable(ctx, LACP_SOCKET_CB_NAME, lacp_port);
++	/* periodic & timeout callback is handled in lacp_port_set_state() */
++	err = lacp_port_set_state(lacp_port, PORT_STATE_EXPIRED);
++	if (err)
++	  return err;
++      } else {
++	teamd_loop_callback_disable(ctx, LACP_SOCKET_CB_NAME, lacp_port);
++	teamd_loop_callback_disable(ctx, LACP_TIMEOUT_CB_NAME, lacp_port);
++	/* periodic callback is handled in lacp_port_set_state() */
++	err = lacp_port_set_state(lacp_port, PORT_STATE_DISABLED);
++	if (err)
++	  return err;
++      }
++    }
++    lacp_port->__link_last.up = ctx->enabled;
++    lacp_port->__link_last.speed = speed;
++    lacp_port->__link_last.duplex = duplex;
++  }
++
++  return 0;
++}
++
+ static int lacp_event_watch_port_added(struct teamd_context *ctx,
+ 				       struct teamd_port *tdport, void *priv)
+ {
+@@ -1346,6 +1394,7 @@ static int lacp_event_watch_port_changed
+ 
+ static const struct teamd_event_watch_ops lacp_port_watch_ops = {
+ 	.hwaddr_changed = lacp_event_watch_hwaddr_changed,
++	.link_changed = lacp_event_watch_link_changed,
+ 	.port_added = lacp_event_watch_port_added,
+ 	.port_removed = lacp_event_watch_port_removed,
+ 	.port_changed = lacp_event_watch_port_changed,
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -124,6 +124,7 @@ struct teamd_context {
+ 	uint32_t			hwaddr_len;
+ 	bool				hwaddr_explicit;
+ 	bool				hwaddr_nomodify;
++	bool				enabled;
+ 	struct {
+ 		struct list_item		callback_list;
+ 		int				ctrl_pipe_r;
+@@ -176,6 +177,7 @@ struct teamd_runner {
+ struct teamd_event_watch_ops {
+ 	int (*hwaddr_changed)(struct teamd_context *ctx, void *priv);
+ 	int (*ifname_changed)(struct teamd_context *ctx, void *priv);
++	int (*link_changed)(struct teamd_context *ctx, void *priv);
+ 	int (*port_added)(struct teamd_context *ctx,
+ 			  struct teamd_port *tdport, void *priv);
+ 	void (*port_removed)(struct teamd_context *ctx,
+@@ -207,6 +209,8 @@ int teamd_event_ifinfo_hwaddr_changed(st
+ 				      struct team_ifinfo *ifinfo);
+ int teamd_event_ifinfo_ifname_changed(struct teamd_context *ctx,
+ 				      struct team_ifinfo *ifinfo);
++int teamd_event_ifinfo_ifi_flags_changed(struct teamd_context *ctx,
++					 struct team_ifinfo *ifinfo);
+ int teamd_events_init(struct teamd_context *ctx);
+ void teamd_events_fini(struct teamd_context *ctx);
+ int teamd_event_watch_register(struct teamd_context *ctx,
+--- a/teamd/teamd.c
++++ b/teamd/teamd.c
+@@ -1655,6 +1655,9 @@ static int teamd_context_init(struct tea
+ 
+ 	/* Enable usock by default */
+ 	ctx->usock.enabled = true;
++
++	ctx->enabled = true;
++
+ 	return 0;
+ }
+ 
+--- a/libteam/ifinfo.c
++++ b/libteam/ifinfo.c
+@@ -34,6 +34,7 @@ struct team_ifinfo {
+ 	struct list_item	list;
+ 	bool			linked;
+ 	uint32_t		ifindex;
++	uint32_t		ifi_flags;
+ 	struct team_port *	port; /* NULL if device is not team port */
+ 	char			hwaddr[MAX_ADDR_LEN];
+ 	size_t			hwaddr_len;
+@@ -54,10 +55,11 @@ struct team_ifinfo {
+ #define CHANGED_MASTER_IFINDEX		(1 << 4)
+ #define CHANGED_PHYS_PORT_ID		(1 << 5)
+ #define CHANGED_PHYS_PORT_ID_LEN	(1 << 6)
++#define CHANGED_IFI_FLAGS		(1 << 7)
+ #define CHANGED_ANY	(CHANGED_REMOVED | CHANGED_HWADDR | \
+ 			 CHANGED_HWADDR_LEN | CHANGED_IFNAME | \
+ 			 CHANGED_MASTER_IFINDEX | CHANGED_PHYS_PORT_ID | \
+-			 CHANGED_PHYS_PORT_ID_LEN)
++			 CHANGED_PHYS_PORT_ID_LEN | CHANGED_IFI_FLAGS)
+ 
+ static void set_changed(struct team_ifinfo *ifinfo, int bit)
+ {
+@@ -147,12 +149,24 @@ static void update_phys_port_id(struct t
+ #endif
+ }
+ 
++static void update_ifi_flags(struct team_ifinfo *ifinfo,
++			     struct rtnl_link *link)
++{
++	unsigned int flags = rtnl_link_get_flags(link);
++
++	if (ifinfo->ifi_flags != flags) {
++		ifinfo->ifi_flags = flags;
++		set_changed(ifinfo, CHANGED_IFI_FLAGS);
++	}
++}
++
+ static void ifinfo_update(struct team_ifinfo *ifinfo, struct rtnl_link *link)
+ {
+ 	update_ifname(ifinfo, link);
+ 	update_master(ifinfo, link);
+ 	update_hwaddr(ifinfo, link);
+ 	update_phys_port_id(ifinfo, link);
++	update_ifi_flags(ifinfo, link);
+ }
+ 
+ static struct team_ifinfo *ifinfo_find(struct team_handle *th, uint32_t ifindex)
+@@ -663,6 +677,34 @@ bool team_is_ifinfo_phys_port_id_len_cha
+ }
+ 
+ /**
++ * team_get_ifinfo_ifi_flags:
++ * @ifinfo: ifinfo structure
++ *
++ * Get ifinfo ifi_flags.
++ *
++ * Returns: ifi_flags.
++ **/
++TEAM_EXPORT
++uint32_t team_get_ifinfo_ifi_flags(struct team_ifinfo *ifinfo)
++{
++	return ifinfo->ifi_flags;
++}
++
++/**
++ * team_is_ifinfo_ifi_flags_changed:
++ * @ifinfo: ifinfo structure
++ *
++ * See if ifinfo ifi_flags got changed.
++ *
++ * Returns: true if ifinfo ifi_flags changed.
++ **/
++TEAM_EXPORT
++bool team_is_ifinfo_ifi_flags_changed(struct team_ifinfo *ifinfo)
++{
++	return is_changed(ifinfo, CHANGED_IFI_FLAGS);
++}
++
++/**
+  * team_is_ifinfo_changed:
+  * @ifinfo: ifinfo structure
+  *
+--- a/include/team.h
++++ b/include/team.h
+@@ -153,6 +153,8 @@ char *team_get_ifinfo_phys_port_id(struc
+ bool team_is_ifinfo_phys_port_id_changed(struct team_ifinfo *ifinfo);
+ size_t team_get_ifinfo_phys_port_id_len(struct team_ifinfo *ifinfo);
+ bool team_is_ifinfo_phys_port_id_len_changed(struct team_ifinfo *ifinfo);
++uint32_t team_get_ifinfo_ifi_flags(struct team_ifinfo *ifinfo);
++bool team_is_ifinfo_ifi_flags_changed(struct team_ifinfo *ifinfo);
+ bool team_is_ifinfo_changed(struct team_ifinfo *ifinfo);
+ 
+ /*
+--- a/teamd/teamd_events.c
++++ b/teamd/teamd_events.c
+@@ -167,6 +167,31 @@ int teamd_event_ifinfo_ifname_changed(st
+ 	return 0;
+ }
+ 
++int teamd_event_ifinfo_ifi_flags_changed(struct teamd_context *ctx,
++					 struct team_ifinfo *ifinfo)
++{
++	struct event_watch_item *watch;
++	uint32_t ifindex = team_get_ifinfo_ifindex(ifinfo);
++	uint32_t ifi_flags = team_get_ifinfo_ifi_flags(ifinfo);
++	int err;
++
++	teamd_log_dbg("%s: ifi_flags changed %d",
++		      team_get_ifinfo_ifname(ifinfo), ifi_flags);
++
++	if (ctx->ifinfo == ifinfo)
++		ctx->enabled = !!(ifi_flags & IFF_UP);
++
++	list_for_each_node_entry(watch, &ctx->event_watch_list, list) {
++		if (watch->ops->link_changed && ctx->ifindex == ifindex) {
++			err = watch->ops->link_changed(ctx, watch->priv);
++			if (err)
++				return err;
++		}
++	}
++
++	return 0;
++}
++
+ int teamd_events_init(struct teamd_context *ctx)
+ {
+ 	list_init(&ctx->event_watch_list);
+--- a/teamd/teamd_ifinfo_watch.c
++++ b/teamd/teamd_ifinfo_watch.c
+@@ -53,6 +53,12 @@ static int ifinfo_change_handler_func(st
+ 			if (err)
+ 				return err;
+ 		}
++		if (team_is_ifinfo_ifi_flags_changed(ifinfo)) {
++			err = teamd_event_ifinfo_ifi_flags_changed(ctx,
++								   ifinfo);
++			if (err)
++				return err;
++		}
+ 	}
+ 	return 0;
+ }

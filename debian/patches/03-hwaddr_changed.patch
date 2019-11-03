@@ -1,0 +1,24 @@
+commit d4b26a9cdd17b2b678622babb30ccfb5811849f8
+Author: Jiri Pirko <jiri@resnulli.us>
+Date:   Thu Mar 19 09:28:00 2015 +0100
+
+    teamd: events: update ctx->hwaddr_len before calling hwaddr_changed handlers
+    
+    Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+
+--- a/teamd/teamd_events.c
++++ b/teamd/teamd_events.c
+@@ -124,6 +124,13 @@ int teamd_event_ifinfo_hwaddr_changed(st
+ 
+ 	list_for_each_node_entry(watch, &ctx->event_watch_list, list) {
+ 		if (watch->ops->hwaddr_changed && ctx->ifindex == ifindex) {
++			/* ctx->hwaddr is previously set to
++			 * team_get_ifinfo_hwaddr(ctx->ifinfo) in teamd_init.
++			 * We set hwaddr_len there as well, but when it changes,
++			 * we need to set it again now.
++			 */
++			ctx->hwaddr_len = team_get_ifinfo_hwaddr_len(ifinfo);
++
+ 			err = watch->ops->hwaddr_changed(ctx, watch->priv);
+ 			if (err)
+ 				return err;

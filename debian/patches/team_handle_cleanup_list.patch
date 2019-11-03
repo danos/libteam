@@ -1,0 +1,166 @@
+From: Jan Blunck <jblunck@infradead.org>
+Subject: Add team_change_end_handler infrastructure
+
+This infrastructure is used to defer the cleanup of ifinfo and port lists to
+happen after all team_change_handlers are run.
+
+Signed-off-by: Jan Blunck <jblunck@infradead.org>
+
+--- a/libteam/team_private.h
++++ b/libteam/team_private.h
+@@ -49,6 +49,7 @@ struct team_handle {
+ 	struct list_item	option_list;
+ 	struct {
+ 		struct list_item		list;
++		struct list_item		end_list;
+ 		team_change_type_mask_t		pending_type_mask;
+ 	} change_handler;
+ 	struct {
+@@ -126,5 +127,8 @@ void set_call_change_handlers(struct tea
+ 			      team_change_type_mask_t set_type_mask);
+ int check_call_change_handlers(struct team_handle *th,
+ 			       team_change_type_mask_t call_type_mask);
++int team_change_end_handler_register(struct team_handle *th,
++				     const struct team_change_handler *handler,
++				     void *priv);
+ 
+ #endif /* _TEAM_PRIVATE_H_ */
+--- a/libteam/libteam.c
++++ b/libteam/libteam.c
+@@ -222,6 +222,18 @@ int check_call_change_handlers(struct te
+ 				break;
+ 		}
+ 	}
++	list_for_each_node_entry(handler_item, &th->change_handler.end_list,
++				 list) {
++		const struct team_change_handler *handler =
++				handler_item->handler;
++		team_change_type_mask_t item_type_mask =
++				handler->type_mask & to_call_type_mask;
++
++		if (item_type_mask) {
++			(void) handler->func(th, handler_item->priv,
++					     item_type_mask);
++		}
++	}
+ 	th->change_handler.pending_type_mask &= ~call_type_mask;
+ 	return err;
+ }
+@@ -261,6 +273,39 @@ __team_change_handler_register(struct te
+ 	return 0;
+ }
+ 
++static struct change_handler_item *
++find_change_end_handler(struct team_handle *th,
++			const struct team_change_handler *handler,
++			void *priv)
++{
++	struct change_handler_item *handler_item;
++
++	list_for_each_node_entry(handler_item, &th->change_handler.end_list,
++				 list)
++		if (handler_item->handler == handler &&
++		    handler_item->priv == priv)
++			return handler_item;
++	return NULL;
++}
++
++int
++team_change_end_handler_register(struct team_handle *th,
++				 const struct team_change_handler *handler,
++				 void *priv)
++{
++	struct change_handler_item *handler_item;
++
++	if (find_change_end_handler(th, handler, priv))
++		return -EEXIST;
++	handler_item = malloc(sizeof(struct change_handler_item));
++	if (!handler_item)
++		return -ENOMEM;
++	handler_item->handler = handler;
++	handler_item->priv = priv;
++	list_add_tail(&th->change_handler.end_list, &handler_item->list);
++	return 0;
++}
++
+ /**
+  * team_change_handler_register:
+  * @th: libteam library context
+@@ -379,6 +424,7 @@ struct team_handle *team_alloc(void)
+ 	dbg(th, "log_priority=%d", th->log_priority);
+ 
+ 	list_init(&th->change_handler.list);
++	list_init(&th->change_handler.end_list);
+ 
+ 	err = ifinfo_list_alloc(th);
+ 	if (err)
+--- a/libteam/ifinfo.c
++++ b/libteam/ifinfo.c
+@@ -362,9 +362,32 @@ int get_ifinfo_list(struct team_handle *
+ 	return check_call_change_handlers(th, TEAM_IFINFO_CHANGE);
+ }
+ 
++static int ifinfo_change_end_handler_func(struct team_handle *th, void *priv,
++					  team_change_type_mask_t type_mask)
++{
++	ifinfo_destroy_removed(th);
++}
++
++static const struct team_change_handler ifinfo_change_end_handler = {
++	.func = ifinfo_change_end_handler_func,
++	.type_mask = TEAM_IFINFO_CHANGE,
++};
++
+ int ifinfo_list_init(struct team_handle *th)
+ {
+ 	int err;
++	static bool registered = false;
++
++	if (!registered) {
++		err = team_change_end_handler_register(th,
++						       &ifinfo_change_end_handler,
++						       NULL);
++		if (err) {
++			err(th, "Failed to register ifinfo change end handler.");
++			return err;
++		}
++		registered = true;
++	}
+ 
+ 	err = get_ifinfo_list(th);
+ 	if (err) {
+--- a/libteam/ports.c
++++ b/libteam/ports.c
+@@ -194,9 +194,32 @@ int port_list_alloc(struct team_handle *
+ 	return 0;
+ }
+ 
++static int port_change_end_handler_func(struct team_handle *th, void *priv,
++					team_change_type_mask_t type_mask)
++{
++	port_list_cleanup_last_state(th);
++}
++
++static const struct team_change_handler port_change_end_handler = {
++	.func = port_change_end_handler_func,
++	.type_mask = TEAM_PORT_CHANGE,
++};
++
+ int port_list_init(struct team_handle *th)
+ {
+ 	int err;
++	static bool registered = false;
++
++	if (!registered) {
++		err = team_change_end_handler_register(th,
++						       &port_change_end_handler,
++						       NULL);
++		if (err) {
++			err(th, "Failed to register port change end handler.");
++			return err;
++		}
++		registered = true;
++	}
+ 
+ 	err = get_port_list(th);
+ 	if (err) {

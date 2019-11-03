@@ -1,0 +1,154 @@
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -357,6 +357,10 @@ void teamd_balancer_port_removed(struct
+ 
+ int teamd_hash_func_set(struct teamd_context *ctx);
+ 
++int teamd_packet_sock_open_type(int type, int *sock_p, const uint32_t ifindex,
++				const unsigned short family,
++				const struct sock_fprog *fprog,
++				const struct sock_fprog *alt_fprog);
+ int teamd_packet_sock_open(int *sock_p, const uint32_t ifindex,
+ 			   const unsigned short family,
+ 			   const struct sock_fprog *fprog,
+@@ -365,6 +369,7 @@ int teamd_getsockname_hwaddr(int sock, s
+ 			     size_t expected_len);
+ int teamd_sendto(int sockfd, const void *buf, size_t len, int flags,
+ 		 const struct sockaddr *dest_addr, socklen_t addrlen);
++int teamd_send(int sockfd, const void *buf, size_t len, int flags);
+ int teamd_recvfrom(int sockfd, void *buf, size_t len, int flags,
+ 		   struct sockaddr *src_addr, socklen_t addrlen);
+ 
+--- a/teamd/teamd_common.c
++++ b/teamd/teamd_common.c
+@@ -81,17 +81,17 @@ static int attach_filter(int sock, const
+ 	return 0;
+ }
+ 
+-int teamd_packet_sock_open(int *sock_p, const uint32_t ifindex,
+-			   const unsigned short family,
+-			   const struct sock_fprog *fprog,
+-			   const struct sock_fprog *alt_fprog)
++int teamd_packet_sock_open_type(int type, int *sock_p, const uint32_t ifindex,
++				const unsigned short family,
++				const struct sock_fprog *fprog,
++				const struct sock_fprog *alt_fprog)
+ {
+ 	struct sockaddr_ll ll_my;
+ 	int sock;
+ 	int ret;
+ 	int err;
+ 
+-	sock = socket(PF_PACKET, SOCK_DGRAM, 0);
++	sock = socket(PF_PACKET, type, 0);
+ 	if (sock == -1) {
+ 		teamd_log_err("Failed to create packet socket.");
+ 		return -errno;
+@@ -121,6 +121,15 @@ close_sock:
+ 	return err;
+ }
+ 
++int teamd_packet_sock_open(int *sock_p, const uint32_t ifindex,
++			   const unsigned short family,
++			   const struct sock_fprog *fprog,
++			   const struct sock_fprog *alt_fprog)
++{
++	return teamd_packet_sock_open_type(SOCK_DGRAM, sock_p, ifindex, family,
++					   fprog, alt_fprog);
++}
++
+ int teamd_getsockname_hwaddr(int sock, struct sockaddr_ll *addr,
+ 			     size_t expected_len)
+ {
+@@ -161,6 +170,29 @@ resend:
+ 			return -errno;
+ 		}
+ 	}
++	return 0;
++}
++
++int teamd_send(int sockfd, const void *buf, size_t len, int flags)
++{
++	ssize_t ret;
++
++resend:
++	ret = send(sockfd, buf, len, flags);
++	if (ret == -1) {
++		switch(errno) {
++		case EINTR:
++			goto resend;
++		case ENETDOWN:
++		case ENETUNREACH:
++		case EADDRNOTAVAIL:
++		case ENXIO:
++			return 0;
++		default:
++			teamd_log_err("send failed.");
++			return -errno;
++		}
++	}
+ 	return 0;
+ }
+ 
+--- a/teamd/teamd_runner_lacp.c
++++ b/teamd/teamd_runner_lacp.c
+@@ -30,6 +30,7 @@
+ #include <errno.h>
+ #include <team.h>
+ #include <private/misc.h>
++#include <net/ethernet.h>
+ 
+ #include "teamd.h"
+ #include "teamd_config.h"
+@@ -60,6 +61,7 @@ struct lacpdu_info {
+ } __attribute__((__packed__));
+ 
+ struct lacpdu {
++	struct ether_header	hdr;
+ 	uint8_t			subtype;
+ 	uint8_t			version_number;
+ 	uint8_t			actor_tlv_type;
+@@ -1022,6 +1024,8 @@ static int lacpdu_send(struct lacp_port
+ 	struct lacpdu lacpdu;
+ 	struct sockaddr_ll ll_my;
+ 	struct sockaddr_ll ll_slow;
++	char *hwaddr;
++	unsigned char hwaddr_len;
+ 	int err;
+ 
+ 	if (! lacp_port->ctx->enabled)
+@@ -1035,12 +1039,19 @@ static int lacpdu_send(struct lacp_port
+ 
+ 	memcpy(lacp_port->actor.system, lacp_port->ctx->hwaddr, ETH_ALEN);
+ 
++	hwaddr = team_get_ifinfo_orig_hwaddr(lacp_port->tdport->team_ifinfo);
++	hwaddr_len = team_get_ifinfo_orig_hwaddr_len(lacp_port->tdport->team_ifinfo);
++	if (hwaddr_len != ETH_ALEN)
++		return 0;
++
+ 	lacpdu_init(&lacpdu);
+ 	lacpdu.actor = lacp_port->actor;
+ 	lacpdu.partner = lacp_port->partner;
++	memcpy(lacpdu.hdr.ether_shost, hwaddr, hwaddr_len);
++	memcpy(lacpdu.hdr.ether_dhost, ll_slow.sll_addr, ll_slow.sll_halen);
++	lacpdu.hdr.ether_type = htons(ETH_P_SLOW);
+ 
+-	err = teamd_sendto(lacp_port->sock, &lacpdu, sizeof(lacpdu), 0,
+-			   (struct sockaddr *) &ll_slow, sizeof(ll_slow));
++	err = teamd_send(lacp_port->sock, &lacpdu, sizeof(lacpdu), 0);
+ 	return err;
+ }
+ 
+@@ -1213,9 +1224,9 @@ static int lacp_port_added(struct teamd_
+ 		return err;
+ 	}
+ 
+-	err = teamd_packet_sock_open(&lacp_port->sock,
+-				     tdport->ifindex,
+-				     htons(ETH_P_SLOW), NULL, NULL);
++	err = teamd_packet_sock_open_type(SOCK_RAW, &lacp_port->sock,
++					  tdport->ifindex,
++					  htons(ETH_P_SLOW), NULL, NULL);
+ 	if (err)
+ 		return err;
+ 

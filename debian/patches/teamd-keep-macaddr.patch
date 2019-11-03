@@ -1,0 +1,48 @@
+Refuse to change the team interface's mac address when taking over an
+existing team.
+
+--- a/teamd/teamd.c
++++ b/teamd/teamd.c
+@@ -810,6 +810,10 @@ static int teamd_set_hwaddr(struct teamd
+ 	char *hwaddr;
+ 	unsigned int hwaddr_len;
+ 
++	if (ctx->hwaddr_nomodify)
++		/* addr should never change */
++		return 0;
++
+ 	err = teamd_config_string_get(ctx, &hwaddr_str, "$.hwaddr");
+ 	if (err)
+ 		return 0; /* addr is not defined in config, no change needed */
+@@ -859,7 +863,8 @@ static int teamd_hwaddr_check_change(str
+ 	unsigned char hwaddr_len;
+ 	int err;
+ 
+-	if (ctx->port_obj_list_count != 1 || ctx->hwaddr_explicit)
++	if (ctx->port_obj_list_count != 1 || ctx->hwaddr_explicit
++	    || ctx->hwaddr_nomodify)
+ 		return 0;
+ 	hwaddr = team_get_ifinfo_orig_hwaddr(tdport->team_ifinfo);
+ 	hwaddr_len = team_get_ifinfo_orig_hwaddr_len(tdport->team_ifinfo);
+@@ -1212,8 +1217,10 @@ static int teamd_init(struct teamd_conte
+ 	team_set_log_fn(ctx->th, libteam_log_daemon);
+ 
+ 	ctx->ifindex = team_ifname2ifindex(ctx->th, ctx->team_devname);
+-	if (ctx->ifindex && ctx->take_over)
++	if (ctx->ifindex && ctx->take_over) {
++		ctx->hwaddr_nomodify = true;
+ 		goto skip_create;
++	}
+ 
+ 	if (ctx->force_recreate)
+ 		err = team_recreate(ctx->th, ctx->team_devname);
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -123,6 +123,7 @@ struct teamd_context {
+ 	char *				hwaddr;
+ 	uint32_t			hwaddr_len;
+ 	bool				hwaddr_explicit;
++	bool				hwaddr_nomodify;
+ 	struct {
+ 		struct list_item		callback_list;
+ 		int				ctrl_pipe_r;

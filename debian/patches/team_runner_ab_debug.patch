@@ -1,0 +1,17 @@
+--- a/teamd/teamd_runner_activebackup.c
++++ b/teamd/teamd_runner_activebackup.c
+@@ -375,8 +375,13 @@ static int ab_link_watch_handler(struct
+ 	 */
+ 	if (active_tdport && teamd_port_present(ctx, active_tdport))
+ 		ab_best_port_check_set(ctx, &best, active_tdport);
+-	teamd_for_each_tdport(tdport, ctx)
++	teamd_for_each_tdport(tdport, ctx) {
++		teamd_log_dbg("Checking port: \"%s\" (ifindex \"%d\", prio \"%d\", lw_up \"%d\").",
++			      tdport->ifname, tdport->ifindex,
++			      teamd_port_prio(ctx, tdport),
++			      teamd_link_watch_port_up(ctx, tdport));
+ 		ab_best_port_check_set(ctx, &best, tdport);
++	}
+ 
+ 	if (!best.tdport || best.tdport == active_tdport)
+ 		return 0;

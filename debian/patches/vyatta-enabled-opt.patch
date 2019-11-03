@@ -1,0 +1,12 @@
+--- a/teamd/teamd_per_port.c
++++ b/teamd/teamd_per_port.c
+@@ -398,7 +398,8 @@ int teamd_port_enabled(struct teamd_cont
+ 	if (!option) {
+ 		teamd_log_dbg("%s: Failed to find \"enabled\" option.",
+ 			      tdport->ifname);
+-		return -ENOENT;
++		*enabled = false;
++		return 0;
+ 	}
+ 	if (team_get_option_type(option) != TEAM_OPTION_TYPE_BOOL) {
+ 		teamd_log_err("Unexpected type of \"enabled\" option.");

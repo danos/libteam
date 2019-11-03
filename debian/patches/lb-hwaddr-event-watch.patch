@@ -1,0 +1,74 @@
+commit 336eb7b92b9413a7598b5ac7c4a755ba258e697f
+Author: Xin Long <lucien.xin@gmail.com>
+Date:   Mon Aug 31 21:28:12 2015 +0800
+
+    teamd: loadbalance mode lacks a .hwaddr_changed in teamd_event_watch_ops
+    
+    commit 01c1e7888cd9 ("teamd: do not change ctx->hwaddr pointer")
+    make the first iface's mac is not same with the team:
+    
+    eth1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+            ether 26:29:fa:60:f0:ea  txqueuelen 1000  (Ethernet) <---
+    
+    eth2: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+            ether 00:a4:f3:8c:47:d6  txqueuelen 1000  (Ethernet)
+    
+    team0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+            ether 00:a4:f3:8c:47:d6  txqueuelen 0  (Ethernet)  <---
+    
+    when we add the first iface to team0, three watch events will be triggerred
+    in teamd:
+    1.teamd_event_watch_port_added.
+      team0's mac will be updated with eth1's mac in teamd_hwaddr_check_change(),
+      besides, ctx->hwaddr will not be update by this mac any more, it still keep
+      the original team mac.
+    
+    2.port_priv_change_handler_func.
+      .port_added() of loadbalance will update eth1's mac with ctx->hwaddr. that's
+      why eth1's mac is different from team0's.
+    
+    but for lacp and activebackup, they both has .hwaddr_changed(). when another
+    watch event comes:
+    3. teamd_event_ifinf_hwaddr_changed:
+      the eth1's mac will be update with team0's mac, now they have the same macs.
+    
+    for broadcast, roundrobin, and random, they don't have neither .port_added()
+    nor .hwaddr_changed(), so the macs of team0 and eth1 are consistent.
+    
+    we can fix it by adding a .hwaddr_changed for loadbalance mode.
+    
+    Fixes: 01c1e7888cd9 ("teamd: do not change ctx->hwaddr pointer")
+    Signed-off-by: Xin Long <lucien.xin@gmail.com>
+    Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+
+diff --git a/teamd/teamd_runner_loadbalance.c b/teamd/teamd_runner_loadbalance.c
+index f98c0fe..43b07af 100644
+--- a/teamd/teamd_runner_loadbalance.c
++++ b/teamd/teamd_runner_loadbalance.c
+@@ -60,7 +60,26 @@ static int lb_event_watch_port_link_changed(struct teamd_context *ctx,
+ 	return teamd_port_check_enable(ctx, tdport, port_up, !port_up);
+ }
+ 
++static int lb_event_watch_hwaddr_changed(struct teamd_context *ctx, void *priv)
++{
++	struct teamd_port *tdport;
++	int err;
++
++	teamd_for_each_tdport(tdport, ctx) {
++		err = team_hwaddr_set(ctx->th, tdport->ifindex, ctx->hwaddr,
++				      ctx->hwaddr_len);
++		if (err) {
++			teamd_log_err("%s: Failed to set port hardware address.",
++				      tdport->ifname);
++			return err;
++		}
++	}
++
++	return 0;
++}
++
+ static const struct teamd_event_watch_ops lb_port_watch_ops = {
++	.hwaddr_changed = lb_event_watch_hwaddr_changed,
+ 	.port_added = lb_event_watch_port_added,
+ 	.port_removed = lb_event_watch_port_removed,
+ 	.port_link_changed = lb_event_watch_port_link_changed,

@@ -1,0 +1,165 @@
+--- a/teamd/teamd_lw_vplane.c
++++ b/teamd/teamd_lw_vplane.c
+@@ -1,6 +1,7 @@
+ #include <netlink/msg.h>
+ #include <linux/if_link.h>
+ #include <linux/rtnetlink.h>
++#include <linux/ethtool.h>
+ #include <sys/queue.h>
+ #include <linux/if.h>
+ #include <unistd.h>
+@@ -21,6 +22,8 @@ struct vplane_link {
+ 	struct lw_common_port_priv common;
+ 	LIST_ENTRY(vplane_link) next;
+ 	char name[255];
++	bool optlist_pending;
++	bool up;
+ 	uint32_t speed;
+ 	uint8_t duplex;
+ };
+@@ -60,6 +63,21 @@ static int lw_vplane_link_state_change(s
+ 
+ 			link->speed = ethtool_cmd_speed(&ecmd);
+ 			link->duplex = ecmd.duplex;
++			link->up = link_up;
++
++			if (team_get_option(ctx->th, "np", "enabled", tdport->ifindex) == NULL) {
++				teamd_log_dbg("%s: options list pending for %s",
++					      __func__, tdport->ifname);
++				link->optlist_pending = true;
++				return 0;
++			}
++
++			if (link->optlist_pending) {
++				teamd_log_dbg("%s: options list pending clear",
++					      __func__);
++			}
++			link->optlist_pending = false;
++
+ 			return teamd_link_watch_check_link_up(ctx, tdport,
+ 				&link->common, link_up);
+ 		}
+@@ -149,6 +167,42 @@ vplane_cb_err:
+ 	return -EINVAL;
+ }
+ 
++/* If we receive the link-up notification from vplaned before teamd
++ * processes the latest options list from the kernel, defer notifying
++ * runner of a link state change until an "enabled" option exists for
++ * this interface (doesn't matter if enabed is true or false).  This
++ * will avoid a number of error messages being logged and prevents
++ * the lacp team master link state updated from exiting early.
++ */
++static int lw_vplane_enabled_option_changed(struct teamd_context *ctx,
++                                             struct team_option *option,
++                                             void *priv)
++{
++	uint32_t ifindex = team_get_option_port_ifindex(option);
++	struct teamd_port *tdport = teamd_get_port(ctx, ifindex);
++	struct vplane_link *link;
++
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, tdport->ifname)) {
++			if (link->optlist_pending == false)
++				return 0;
++
++			teamd_log_dbg("%s: %s lsc pending clear",
++				      __func__, tdport->ifname);
++			link->optlist_pending = false;
++			return lw_vplane_link_state_change(ctx, link->name,
++							   link->up);
++		}
++	}
++
++        return 0;
++}
++
++static const struct teamd_event_watch_ops lw_vplane_option_watch_ops = {
++	.option_changed = lw_vplane_enabled_option_changed,
++	.option_changed_match_name = "enabled",
++};
++
+ static int lw_vplane_port_added(struct teamd_context *ctx,
+ 			      struct teamd_port *tdport,
+ 			      void *priv, void *creator_priv)
+@@ -193,6 +247,14 @@ err = teamd_zmq_vplane_callback_add(ctx,
+ 		teamd_zmq_vplane_close(ctx);
+ 		return err;
+ 	}
++
++	err = teamd_event_watch_register(ctx, &lw_vplane_option_watch_ops, NULL);
++	if (err) {
++		teamd_log_err("Failed to register event watch.");
++		teamd_zmq_vplane_close(ctx);
++		return err;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -210,6 +272,7 @@ static void lw_vplane_port_removed(struc
+ 	}
+ 
+ 	if (LIST_EMPTY(&all_links)) {
++		teamd_event_watch_unregister(ctx, &lw_vplane_option_watch_ops, NULL);
+ 		teamd_zmq_vplane_callback_del(ctx, &callback_priv);
+ 		teamd_zmq_vplane_close(ctx);
+ 		close(udp_fd);
+@@ -222,6 +285,7 @@ static int lw_vplane_link_state_speed_ge
+ 					  void *priv)
+ {
+ 	struct vplane_link *link;
++
+ 	LIST_FOREACH(link, &all_links, next) {
+ 		if (!strcmp(link->name, gsc->info.tdport->ifname)) {
+ 			gsc->data.int_val = (int)link->speed;
+@@ -243,6 +307,32 @@ static int lw_vplane_link_state_duplex_g
+ 	return 0;
+ }
+ 
++static int lw_vplane_link_state_pending_get(struct teamd_context *ctx,
++					    struct team_state_gsc *gsc,
++					    void *priv)
++{
++	struct vplane_link *link;
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, gsc->info.tdport->ifname)) {
++			gsc->data.bool_val = link->optlist_pending;
++		}
++	}
++	return 0;
++}
++
++static int lw_vplane_link_state_up_get(struct teamd_context *ctx,
++				       struct team_state_gsc *gsc,
++				       void *priv)
++{
++	struct vplane_link *link;
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, gsc->info.tdport->ifname)) {
++			gsc->data.bool_val = link->up;
++		}
++	}
++	return 0;
++}
++
+ static const struct teamd_state_val lw_vplane_state_vals[]  = {
+ 	{
+ 		.subpath = "speed",
+@@ -254,6 +344,16 @@ static const struct teamd_state_val lw_v
+ 		.type = TEAMD_STATE_ITEM_TYPE_INT,
+ 		.getter = lw_vplane_link_state_duplex_get,
+ 	},
++	{
++		.subpath = "optlist_pending",
++		.type = TEAMD_STATE_ITEM_TYPE_BOOL,
++		.getter = lw_vplane_link_state_pending_get,
++	},
++	{
++		.subpath = "up",
++		.type = TEAMD_STATE_ITEM_TYPE_BOOL,
++		.getter = lw_vplane_link_state_up_get,
++	},
+ };
+ 
+ const struct teamd_link_watch teamd_link_watch_vplane = {

@@ -1,0 +1,11 @@
+--- a/teamd/teamd_per_port.c
++++ b/teamd/teamd_per_port.c
+@@ -396,7 +396,7 @@ int teamd_port_enabled(struct teamd_cont
+ 
+ 	option = team_get_option(ctx->th, "np", "enabled", tdport->ifindex);
+ 	if (!option) {
+-		teamd_log_err("%s: Failed to find \"enabled\" option.",
++		teamd_log_dbg("%s: Failed to find \"enabled\" option.",
+ 			      tdport->ifname);
+ 		return -ENOENT;
+ 	}

@@ -1,0 +1,657 @@
+Subject: team daemon linkwatch that receives updates from vplane via ZMQ
+
+When we start the team_lw_vplane the initial link state is unknown until the
+first link change event arrives via ZMQ. Therefore the link status is
+initialized with what the team daemon knows about the interface.
+
+--- a/teamd/teamd.h
++++ b/teamd/teamd.h
+@@ -140,6 +140,7 @@ struct teamd_context {
+ 		bool			enabled;
+ 		void *			context;
+ 		void *			sock;
++		void *			vplane;
+ 		char *			addr;
+ 	} zmq;
+ #endif
+--- a/teamd/teamd_zmq.c
++++ b/teamd/teamd_zmq.c
+@@ -37,6 +37,7 @@
+ #include "teamd.h"
+ #include "teamd_zmq.h"
+ #include "teamd_zmq_common.h"
++#include "teamd_zmq_vplane.h"
+ #include "teamd_ctl.h"
+ #include "teamd_config.h"
+ 
+@@ -206,18 +207,27 @@ static int callback_zmq(struct teamd_con
+ 
+ #define ZMQ_MAX_CLIENT_COUNT 10
+ 
+-static int teamd_zmq_sock_open(struct teamd_context *ctx)
++static int teamd_zmq_context_init(struct teamd_context *ctx)
++{
++	void *context = zmq_ctx_new();
++	if (!context) {
++		teamd_log_err("zmq: Failed to create context.");
++		return -errno;
++	}
++	ctx->zmq.context = context;
++	return 0;
++}
++
++static int teamd_zmq_client_sock_open(struct teamd_context *ctx)
+ {
+ 	int err;
+ 	void *context, *sock;
+ 	int rc;
+ 	const char *addr;
+ 
+-	context = zmq_ctx_new();
+-	if (!context) {
+-		teamd_log_err("zmq: Failed to create context.");
+-		return -errno;
+-	}
++	context = ctx->zmq.context;
++	if (context == NULL)
++		return -EINVAL;
+ 
+ 	sock = zmq_socket(context, ZMQ_REP);
+ 	if (!sock) {
+@@ -242,20 +252,17 @@ static int teamd_zmq_sock_open(struct te
+ 		goto close_sock;
+ 	}
+ 
+-	ctx->zmq.context = context;
+ 	ctx->zmq.sock = sock;
+ 	return 0;
+ 
+ close_sock:
+ 	zmq_close(sock);
+-	zmq_ctx_destroy(context);
+ 	return err;
+ }
+ 
+-static void teamd_zmq_sock_close(struct teamd_context *ctx)
++static void teamd_zmq_client_sock_close(struct teamd_context *ctx)
+ {
+ 	zmq_close(ctx->zmq.sock);
+-	zmq_ctx_destroy(ctx->zmq.context);
+ }
+ 
+ #define ZMQ_CB_NAME "zmq"
+@@ -266,13 +273,17 @@ int teamd_zmq_init(struct teamd_context
+ 	int fd;
+ 	size_t fd_size;
+ 
++	err = teamd_zmq_context_init(ctx);
++	if (err)
++		return err;
++
+ 	if (!ctx->zmq.enabled)
+ 		return 0;
+-	err = teamd_zmq_sock_open(ctx);
++
++	err = teamd_zmq_client_sock_open(ctx);
+ 	if (err)
+ 		return err;
+ 
+-
+ 	fd_size = sizeof(fd);
+ 	zmq_getsockopt(ctx->zmq.sock, ZMQ_FD, &fd, &fd_size);
+ 
+@@ -282,17 +293,23 @@ int teamd_zmq_init(struct teamd_context
+ 		goto sock_close;
+ 	teamd_loop_callback_enable(ctx, ZMQ_CB_NAME, ctx);
+ 	return 0;
++
+ sock_close:
+-	teamd_zmq_sock_close(ctx);
++	teamd_zmq_client_sock_close(ctx);
++	teamd_zmq_vplane_close(ctx);
+ 	return err;
+ }
+ 
+ void teamd_zmq_fini(struct teamd_context *ctx)
+ {
++	teamd_zmq_vplane_close(ctx);
++
+ 	if (!ctx->zmq.enabled)
+ 		return;
++
+ 	teamd_loop_callback_del(ctx, ZMQ_CB_NAME, ctx);
+-	teamd_zmq_sock_close(ctx);
++	teamd_zmq_client_sock_close(ctx);
++	zmq_term(ctx->zmq.context);
+ }
+ 
+ #endif /* ENABLE_ZMQ */
+--- /dev/null
++++ b/teamd/teamd_zmq_vplane.c
+@@ -0,0 +1,199 @@
++#include "config.h"
++
++#ifdef ENABLE_ZMQ
++
++#include <sys/un.h>
++#include <errno.h>
++#include <ctype.h>
++#include <private/misc.h>
++#include <private/list.h>
++#include <team.h>
++#include <czmq.h>
++#include <net/ethernet.h>
++
++#include "teamd.h"
++#include "teamd_zmq_vplane.h"
++#include "teamd_ctl.h"
++#include "teamd_config.h"
++
++int teamd_zmq_vplane_open(struct teamd_context *ctx)
++{
++	int err;
++	void *context, *sock;
++	int rc;
++	const char *addr;
++
++	context = ctx->zmq.context;
++	if (context == NULL)
++		return -EINVAL;
++
++	if (ctx->zmq.vplane) {
++		teamd_log_err("zmq: Already have vplane connection.");
++		return -EEXIST;
++	}
++
++	sock = zmq_socket(context, ZMQ_SUB);
++	if (!sock) {
++		teamd_log_err("zmq: Failed to create socket.");
++		return -errno;
++	}
++
++	err = teamd_config_string_get(ctx, &addr, "$.runner.controller");
++	if (err) {
++		teamd_log_err("zmq: "
++		              "Failed to get vplane address from config.  "
++		              "Not opening connection to vplane.");
++		err = 0;
++		goto close_sock;
++	}
++
++	rc = zmq_connect(sock, addr);
++	if (rc != 0) {
++		teamd_log_err("zmq: Failed to connect socket.");
++		err = -errno;
++		goto close_sock;
++	}
++
++	rc = zmq_setsockopt(sock, ZMQ_SUBSCRIBE, "link", 4);
++	if (rc != 0) {
++		teamd_log_err("zmq: Failed to set vplane socket "
++		              "subscription.");
++		err = -errno;
++		goto close_sock;
++	}
++
++	ctx->zmq.vplane = sock;
++
++	return 0;
++
++close_sock:
++	ctx->zmq.vplane = NULL;
++	zmq_close(sock);
++	return err;
++}
++
++void teamd_zmq_vplane_close(struct teamd_context *ctx)
++{
++	if (ctx->zmq.vplane) {
++		zmq_close(ctx->zmq.vplane);
++		ctx->zmq.vplane = NULL;
++	}
++}
++
++void teamd_zmq_vplane_close_conn(struct teamd_context *ctx)
++{
++	teamd_zmq_vplane_close(ctx);
++}
++
++
++int teamd_zmq_vplane_recvfrom(struct teamd_context *ctx, void *buf, size_t len)
++{
++	int err = 0;
++	int poolmask;
++	size_t poolmask_size = sizeof(poolmask);
++	void *zsock = ctx->zmq.vplane;
++
++	err = zmq_getsockopt(zsock, ZMQ_EVENTS, &poolmask, &poolmask_size);
++	if (err == -1)
++		return -errno;
++
++	if (!(poolmask & ZMQ_POLLIN))
++		return -EAGAIN;
++
++	zmsg_t *msg = zmsg_recv(zsock);
++
++	if (msg == NULL)
++		return -errno;
++
++	char *msgtype = zmsg_popstr(msg);
++
++	if (msgtype == NULL) {
++		zmsg_destroy(&msg);
++		return -errno;
++	}
++
++	int comp = strncmp(msgtype, "link", 4);
++
++	free(msgtype);
++	if (comp) {
++		zmsg_destroy(&msg);
++		return -1;
++	}
++
++	zframe_t *fr = zmsg_pop(msg);
++
++	if (fr == NULL) {
++		zmsg_destroy(&msg);
++		return -errno;
++	}
++
++	if (zframe_size(fr) != sizeof(uint64_t)) {
++		zframe_destroy(&fr);
++		zmsg_destroy(&msg);
++		return -1;
++	}
++
++	/* throw away the sequence number for now */
++	zframe_destroy(&fr);
++
++	fr = zmsg_pop(msg);
++	if (fr == NULL) {
++		zmsg_destroy(&msg);
++		return -errno;
++	}
++
++	if (zframe_size(fr) > len) {
++		zframe_destroy(&fr);
++		zmsg_destroy(&msg);
++		return -errno;
++	}
++
++	memcpy(buf, zframe_data(fr), zframe_size(fr));
++	err = (int)zframe_size(fr);
++	zframe_destroy(&fr);
++	zmsg_destroy(&msg);
++	return (err);
++}
++
++int teamd_zmq_vplane_have_conn(struct teamd_context *ctx)
++{
++	return ctx->zmq.vplane ? 1 : 0;
++}
++
++#define ZMQ_VPLANE_CB_NAME "zmq_vplane"
++int teamd_zmq_vplane_callback_add(struct teamd_context *ctx, void *lacp,
++	                             teamd_loop_callback_func_t func,
++                                     int fd_event)
++{
++	/* there is only one zmq socket that serves incoming lacpdus
++	 * for all enslaved interfaces.  only register the callback when
++	 * the first port is added.
++	 */
++	if (ctx->port_obj_list_count != 1)
++		return 0;
++
++	int fd;
++	size_t fd_size = sizeof(fd);
++
++	zmq_getsockopt(ctx->zmq.vplane, ZMQ_FD, &fd, &fd_size);
++
++	int err = teamd_loop_callback_fd_add(ctx, ZMQ_VPLANE_CB_NAME,
++	                                     lacp, func, fd, fd_event);
++	if (err)
++		return err;
++
++	err = teamd_loop_callback_enable(ctx, ZMQ_VPLANE_CB_NAME, lacp);
++
++	return err;
++}
++
++int teamd_zmq_vplane_callback_del(struct teamd_context *ctx, void *lacp)
++{
++	if (ctx->port_obj_list_count > 0)
++		return 0;
++
++	teamd_loop_callback_del(ctx, ZMQ_VPLANE_CB_NAME, lacp);
++	return 0;
++}
++#endif
++
+--- /dev/null
++++ b/teamd/teamd_zmq_vplane.h
+@@ -0,0 +1,57 @@
++#ifndef _TEAMD_ZMQ_VPLANE_H_
++#define _TEAMD_ZMQ_VPLANE_H_
++
++#define ZMQ_VPLANE_TYPE_LACP		0
++#define ZMQ_VPLANE_TYPE_NETLINK	1
++
++#ifdef ENABLE_ZMQ
++#include <sys/types.h>
++#include <sys/socket.h>
++
++int teamd_zmq_vplane_open(struct teamd_context *ctx);
++void teamd_zmq_vplane_close(struct teamd_context *ctx);
++void teamd_zmq_vplane_close_conn(struct teamd_context *ctx);
++int teamd_zmq_vplane_recvfrom(struct teamd_context *ctx, void *buf, size_t len);
++int teamd_zmq_vplane_have_conn(struct teamd_context *ctx);
++int teamd_zmq_vplane_callback_add(struct teamd_context *ctx, void *lacp,
++	                             teamd_loop_callback_func_t func,
++                                     int fd_event);
++int teamd_zmq_vplane_callback_del(struct teamd_context *ctx, void *lacp);
++#else
++static inline
++int teamd_zmq_vplane_open(struct teamd_context *ctx)
++{
++	return 0;
++}
++static inline
++int teamd_zmq_vplane_close_conn(struct teamd_context *ctx)
++{
++	return 0;
++}
++static inline
++int teamd_zmq_vplane_recvfrom(struct teamd_context *ctx, void *buf,
++                                 size_t len, struct sockaddr *src_addr,
++                                 socklen_t addrlen)
++{
++	return 0;
++}
++static inline
++int teamd_zmq_vplane_have_conn(struct teamd_context *ctx)
++{
++	return 0;
++}
++static inline
++int teamd_zmq_vplane_callback_add(struct teamd_context *ctx, void *lacp,
++	                             teamd_loop_callback_func_t func,
++                                     int fd_event)
++{
++	return 0;
++}
++static inline
++int teamd_zmq_vplane_callback_del(struct teamd_context *ctx, void *lacp)
++{
++	return 0;
++}
++#endif
++#endif
++
+--- a/teamd/Makefile.am
++++ b/teamd/Makefile.am
+@@ -6,9 +6,9 @@ AM_CFLAGS = -I${top_srcdir}/include
+ 
+ AM_CPPFLAGS='-DLOCALSTATEDIR="$(localstatedir)"'
+ 
+-teamd_CFLAGS= $(LIBDAEMON_CFLAGS) $(JANSSON_CFLAGS) $(DBUS_CFLAGS) -I${top_srcdir}/include -D_GNU_SOURCE
++teamd_CFLAGS= $(LIBDAEMON_CFLAGS) $(JANSSON_CFLAGS) $(DBUS_CFLAGS) $(LIBNL_CFLAGS) -I${top_srcdir}/include -D_GNU_SOURCE
+ 
+-teamd_LDADD = $(top_builddir)/libteam/libteam.la $(LIBDAEMON_LIBS) $(JANSSON_LIBS) $(DBUS_LIBS) $(ZMQ_LIBS)
++teamd_LDADD = $(top_builddir)/libteam/libteam.la $(LIBDAEMON_LIBS) $(JANSSON_LIBS) $(DBUS_LIBS) $(LIBNL_LIBS) $(ZMQ_LIBS) $(CZMQ_LIBS)
+ 
+ bin_PROGRAMS=teamd
+ teamd_SOURCES=teamd.c teamd_common.c teamd_json.c teamd_config.c teamd_state.c \
+@@ -19,7 +19,8 @@ teamd_SOURCES=teamd.c teamd_common.c tea
+ 	      teamd_zmq.c teamd_usock.c teamd_phys_port_check.c \
+ 	      teamd_bpf_chef.c teamd_hash_func.c teamd_balancer.c \
+ 	      teamd_runner_basic_ones.c teamd_runner_activebackup.c \
+-	      teamd_runner_loadbalance.c teamd_runner_lacp.c
++	      teamd_runner_loadbalance.c teamd_runner_lacp.c \
++	      teamd_zmq_vplane.c teamd_lw_vplane.c
+ 
+ EXTRA_DIST = example_configs dbus redhat
+ 
+--- a/configure.ac
++++ b/configure.ac
+@@ -99,6 +99,12 @@ AC_ARG_ENABLE([zmq],
+ 	if test "x$have_zmq$enable_zmq" = xnoyes; then
+ 		AC_MSG_ERROR([*** ZeroMQ support requested but libraries not found])
+ 	fi
++	PKG_CHECK_MODULES([CZMQ], [libczmq >= 3.0],
++			  [AC_DEFINE(ENABLE_CZMQ, [1], [CZMQ API.]) have_czmq=yes],
++			  have_czmq=no)
++	if test "x$have_czmq$enable_zmq" = xnoyes; then
++		AC_MSG_ERROR([*** ZeroMQ support requested but libczmq not found])
++	fi
+ fi
+ 
+ AC_CONFIG_FILES([Makefile
+--- /dev/null
++++ b/teamd/teamd_lw_vplane.c
+@@ -0,0 +1,207 @@
++#include <netlink/msg.h>
++#include <linux/if_link.h>
++#include <linux/rtnetlink.h>
++#include <sys/queue.h>
++#include <linux/if.h>
++#include <unistd.h>
++#include <private/misc.h>
++
++#include "teamd.h"
++#include "teamd_link_watch.h"
++#include "teamd_config.h"
++#include "teamd_zmq_vplane.h"
++
++/*
++ * Monitor Vyatta dataplane
++ */
++
++struct vplane_link {
++	struct lw_common_port_priv common;
++	LIST_ENTRY(vplane_link) next;
++	char name[255];
++};
++
++static LIST_HEAD(links, vplane_link) all_links;
++static int callback_priv = 0;
++
++struct lw_vplane_event {
++	char name[255];
++	bool up;
++	bool valid;
++};
++
++static int lw_vplane_link_state_change(struct teamd_context *ctx, char *name,
++				       bool link_up)
++{
++	struct vplane_link *link;
++
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, name)) {
++			teamd_log_info("vplane: link <%s> went %s.", name,
++					link_up ? "up" : "down");
++			struct teamd_port *tdport = link->common.tdport;
++			return teamd_link_watch_check_link_up(ctx, tdport,
++				&link->common, link_up);
++		}
++	}
++	return 0;
++}
++
++static int lw_vplane_netlink_process(struct nlmsghdr *nlh, void *data)
++{
++	if (nlh->nlmsg_type != RTM_NEWLINK && nlh->nlmsg_type != RTM_DELLINK)
++		return 0;
++
++	struct ifinfomsg *ifi = nlmsg_data(nlh);
++	struct nlattr *tb[IFLA_MAX+1] = { NULL };
++	int ret = nlmsg_parse(nlh, sizeof(*ifi), tb, IFLA_MAX, NULL);
++
++	if (ret < 0) {
++		teamd_log_err("vplane: link attribute handler failed");
++		return ret;
++	}
++
++	struct lw_vplane_event *event = data;
++
++	if (tb[IFLA_IFNAME] == NULL)
++		return 0;
++
++	if (ifi->ifi_flags & IFF_UP) {
++		if (!(ifi->ifi_flags & IFF_RUNNING))
++			event->up = false;
++		else
++			event->up = true;
++	}
++
++strncpy(event->name, nla_get_string(tb[IFLA_IFNAME]), sizeof(event->name));
++	event->valid = true;
++
++	return 0;
++}
++
++static int lw_vplane_callback(struct teamd_context *ctx, int events, void *priv)
++{
++	struct lw_vplane_event event = {.name = {0, }, };
++	void *buf;
++	size_t buflen;
++
++	buflen = sysconf(_SC_PAGESIZE);
++	buf = malloc(buflen);
++	if (buf == NULL)
++		return -ENOMEM;
++
++	int recvlen;
++	int rc;
++
++while ((rc = recvlen = teamd_zmq_vplane_recvfrom(ctx, buf, buflen)) > 0) {
++		if (recvlen < sizeof(struct nlmsghdr))
++			continue;
++
++		int rc = lw_vplane_netlink_process(buf, &event);
++
++		if (rc)
++			goto vplane_cb_err;
++
++		if (event.valid)
++		rc = lw_vplane_link_state_change(ctx, event.name, event.up);
++	}
++
++	free(buf);
++
++	if (rc == -EAGAIN)
++		return 0;
++
++	teamd_log_dbg("%s returning %d", __func__, rc);
++	return rc;
++
++vplane_cb_err:
++	free(buf);
++	teamd_log_dbg("vplane: link state event error");
++	return -EINVAL;
++}
++
++static int lw_vplane_port_added(struct teamd_context *ctx,
++			      struct teamd_port *tdport,
++			      void *priv, void *creator_priv)
++{
++	struct vplane_link *link = (struct vplane_link *)priv;
++	int err;
++	int connected;
++
++	connected = teamd_zmq_vplane_have_conn(ctx);
++	if (!connected)
++		LIST_INIT(&all_links);
++
++	strcpy(link->name, tdport->ifname);
++	LIST_INSERT_HEAD(&all_links, link, next);
++	teamd_log_dbg("vplane port %s added", link->name);
++
++	/* sync initial state of link_up with teamd's state */
++	link->common.link_up = team_is_port_link_up(tdport->team_port);
++
++	if (connected)
++		return 0;
++
++	err = teamd_zmq_vplane_open(ctx);
++	if (err) {
++		teamd_log_err("vplane: Failed to contact vplane controller");
++		return err;
++	}
++
++err = teamd_zmq_vplane_callback_add(ctx, &callback_priv, lw_vplane_callback,
++	                                    TEAMD_LOOP_FD_EVENT_READ);
++	if (err) {
++		teamd_log_err("vplane: Failed to add callback");
++		teamd_zmq_vplane_close(ctx);
++		return err;
++	}
++	return 0;
++}
++
++
++
++static void lw_vplane_port_removed(struct teamd_context *ctx,
++				 struct teamd_port *tdport,
++				 void *priv, void *creator_priv)
++{
++	struct vplane_link *link = (struct vplane_link *)priv;
++
++	if (link) {
++		LIST_REMOVE(link, next);
++		teamd_log_dbg("vplane port %s removed", link->name);
++	}
++
++	if (LIST_EMPTY(&all_links)) {
++		teamd_zmq_vplane_callback_del(ctx, &callback_priv);
++		teamd_zmq_vplane_close(ctx);
++	}
++}
++
++static int lw_vplane_state_unused_get(struct teamd_context *ctx,
++				      struct team_state_gsc *gsc,
++				      void *priv)
++{
++	gsc->data.int_val = 0;
++	return 0;
++}
++
++static const struct teamd_state_val lw_vplane_state_vals[] = {
++	{
++		.subpath = "unused",
++		.type = TEAMD_STATE_ITEM_TYPE_INT,
++		.getter = lw_vplane_state_unused_get,
++	},
++};
++
++const struct teamd_link_watch teamd_link_watch_vplane = {
++	.name			= "vplane",
++	.state_vg		= {
++		.vals		= lw_vplane_state_vals,
++		.vals_count	= ARRAY_SIZE(lw_vplane_state_vals),
++	},
++	.port_priv = {
++		.init		= lw_vplane_port_added,
++		.fini		= lw_vplane_port_removed,
++		.priv_size	= sizeof(struct vplane_link),
++	},
++};
+--- a/teamd/teamd_link_watch.c
++++ b/teamd/teamd_link_watch.c
+@@ -37,6 +37,7 @@ extern const struct teamd_link_watch tea
+ extern const struct teamd_link_watch teamd_link_watch_arp_ping;
+ extern const struct teamd_link_watch teamd_link_watch_nsnap;
+ extern const struct teamd_link_watch teamd_link_watch_tipc;
++extern const struct teamd_link_watch teamd_link_watch_vplane;
+ 
+ int __set_sockaddr(struct sockaddr *sa, socklen_t sa_len, sa_family_t family,
+ 		   const char *hostname)
+@@ -101,6 +102,7 @@ static const struct teamd_link_watch *te
+ 	&teamd_link_watch_arp_ping,
+ 	&teamd_link_watch_nsnap,
+ 	&teamd_link_watch_tipc,
++	&teamd_link_watch_vplane,
+ };
+ 
+ #define TEAMD_LINK_WATCH_LIST_SIZE ARRAY_SIZE(teamd_link_watch_list)

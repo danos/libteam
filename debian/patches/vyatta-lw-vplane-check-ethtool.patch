@@ -1,0 +1,124 @@
+--- a/teamd/teamd_lw_vplane.c
++++ b/teamd/teamd_lw_vplane.c
+@@ -5,6 +5,8 @@
+ #include <linux/if.h>
+ #include <unistd.h>
+ #include <private/misc.h>
++#include <linux/ethtool.h>
++#include <linux/sockios.h>
+ 
+ #include "teamd.h"
+ #include "teamd_link_watch.h"
+@@ -19,10 +21,13 @@ struct vplane_link {
+ 	struct lw_common_port_priv common;
+ 	LIST_ENTRY(vplane_link) next;
+ 	char name[255];
++	uint32_t speed;
++	uint8_t duplex;
+ };
+ 
+ static LIST_HEAD(links, vplane_link) all_links;
+ static int callback_priv = 0;
++static int udp_fd = -1;
+ 
+ struct lw_vplane_event {
+ 	char name[255];
+@@ -35,12 +40,26 @@ static int lw_vplane_link_state_change(s
+ 				       bool link_up)
+ {
+ 	struct vplane_link *link;
++	struct ethtool_cmd ecmd;
++	struct ifreq ifr;
+ 
+ 	LIST_FOREACH(link, &all_links, next) {
+ 		if (!strcmp(link->name, name)) {
+ 			teamd_log_info("vplane: link <%s> went %s.", name,
+ 					link_up ? "up" : "down");
+ 			struct teamd_port *tdport = link->common.tdport;
++
++			memset(&ifr, 0, sizeof(ifr));
++			strncpy(ifr.ifr_name, link->name, IFNAMSIZ);
++			ifr.ifr_data = &ecmd;
++			ecmd.cmd = ETHTOOL_GSET;
++			if (ioctl(udp_fd, SIOCETHTOOL, &ifr)) {
++				teamd_log_err("vplane: unable to get ethtool settings");
++				return -errno;
++			}
++
++			link->speed = ethtool_cmd_speed(&ecmd);
++			link->duplex = ecmd.duplex;
+ 			return teamd_link_watch_check_link_up(ctx, tdport,
+ 				&link->common, link_up);
+ 		}
+@@ -151,10 +170,16 @@ static int lw_vplane_port_added(struct t
+ 
+ 	/* sync initial state of link_up with teamd's state */
+ 	link->common.link_up = team_is_port_link_up(tdport->team_port);
++	link->speed = team_get_port_speed(tdport->team_port);
++	link->duplex = team_get_port_duplex(tdport->team_port);
+ 
+ 	if (connected)
+ 		return 0;
+ 
++	udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (udp_fd < 0)
++		return -errno;
++
+ 	err = teamd_zmq_vplane_open(ctx);
+ 	if (err) {
+ 		teamd_log_err("vplane: Failed to contact vplane controller");
+@@ -187,22 +212,47 @@ static void lw_vplane_port_removed(struc
+ 	if (LIST_EMPTY(&all_links)) {
+ 		teamd_zmq_vplane_callback_del(ctx, &callback_priv);
+ 		teamd_zmq_vplane_close(ctx);
++		close(udp_fd);
++		udp_fd = -1;
++	}
++}
++
++static int lw_vplane_link_state_speed_get(struct teamd_context *ctx,
++					  struct team_state_gsc *gsc,
++					  void *priv)
++{
++	struct vplane_link *link;
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, gsc->info.tdport->ifname)) {
++			gsc->data.int_val = (int)link->speed;
++		}
+ 	}
++	return 0;
+ }
+ 
+-static int lw_vplane_state_unused_get(struct teamd_context *ctx,
+-				      struct team_state_gsc *gsc,
+-				      void *priv)
++static int lw_vplane_link_state_duplex_get(struct teamd_context *ctx,
++					   struct team_state_gsc *gsc,
++					   void *priv)
+ {
+-	gsc->data.int_val = 0;
++	struct vplane_link *link;
++	LIST_FOREACH(link, &all_links, next) {
++		if (!strcmp(link->name, gsc->info.tdport->ifname)) {
++			gsc->data.int_val = (int)link->duplex;
++		}
++	}
+ 	return 0;
+ }
+ 
+-static const struct teamd_state_val lw_vplane_state_vals[] = {
++static const struct teamd_state_val lw_vplane_state_vals[]  = {
++	{
++		.subpath = "speed",
++		.type = TEAMD_STATE_ITEM_TYPE_INT,
++		.getter = lw_vplane_link_state_speed_get,
++	},
+ 	{
+-		.subpath = "unused",
++		.subpath = "duplex",
+ 		.type = TEAMD_STATE_ITEM_TYPE_INT,
+-		.getter = lw_vplane_state_unused_get,
++		.getter = lw_vplane_link_state_duplex_get,
+ 	},
+ };
+ 

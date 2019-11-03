@@ -1,0 +1,28 @@
+Subject: teamdctl aborts in zmq_connect
+
+If teamdctl is called to dump config on an interface where teamd
+is not running, it aborts in zmq_connect.
+teamdctl_connect tries to connect using usock first.
+If no socket exists, it tries to use zmq, but passes a NULL address.
+zmq_connect aborts with assertion failure.
+Check for a NULL address in cli_zmq_init.
+
+Signed-off-by: George Wilkie <george.wilkie@intl.att.com>
+---
+ libteamdctl/cli_zmq.c |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- a/libteamdctl/cli_zmq.c
++++ b/libteamdctl/cli_zmq.c
+@@ -210,6 +210,11 @@ static int cli_zmq_init(struct teamdctl
+ 	void *context, *sock;
+ 	int recv_timeo;
+ 
++	if (!tdc->addr) {
++		err(tdc, "zmq: Connect address required.");
++		return -EINVAL;
++	}
++
+ 	context = zmq_ctx_new();
+ 	if (!context) {
+ 		err(tdc, "zmq: Failed to create context.");

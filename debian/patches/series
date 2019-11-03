@@ -1,0 +1,39 @@
+# backport from 1.16
+01-hwaddr_changed.patch
+02-hwaddr_changed.patch
+03-hwaddr_changed.patch
+
+# backport from 1.17
+lb-hwaddr-event-watch.patch
+fix_rtnl_dellink_handling.patch
+libteamdctl-fix-timeval-value-for-select.patch
+
+# backport from 1.21
+libteam_fix_compile_error_with_newer_libnl.patch
+libteam_check_for_definition_of_NLA_PUT_S.patch
+libteam_add_missing_static_inline_in_nl_updates.patch
+
+# not upstream
+libzmq-4.0.patch
+lacp-refactor.patch
+teamd_lw_vplane.patch
+libteamdctl_remove_libdaemon.patch
+teamd_static_link_libdaemon.patch
+teamd-keep-macaddr.patch
+teamd-log.patch
+lacp_mux_machine.patch
+teamd_handle_nl_iff_up.patch
+teamd_handle_nl_mtu.patch
+team_handle_cleanup_list.patch
+team_ifinfo_update_orig_hwaddr.patch
+team_runner_ab_debug.patch
+teamd_lacp_key_config.patch
+teamdctl-zmq-crash
+vyatta-lacp-srcaddr.patch
+vyatta-link-watch-link-params.patch
+vyatta-lw-vplane-check-ethtool.patch
+vyatta-message-priority.patch
+vyatta-defer-linkup.patch
+vyatta-enabled-opt.patch
+vyatta-slave-mac-update.patch
+vyatta-lacp-port-link-changed.patch
