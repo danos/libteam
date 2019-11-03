@@ -37,3 +37,4 @@ vyatta-defer-linkup.patch
 vyatta-enabled-opt.patch
 vyatta-slave-mac-update.patch
 vyatta-lacp-port-link-changed.patch
+vyatta-lw-port-link-change.patch

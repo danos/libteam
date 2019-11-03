@@ -1,6 +1,6 @@
-libteam (1.11-1vyatta19.1) unstable; urgency=medium
+libteam (1.11-1vyatta22) unstable; urgency=medium
 
-  * DANOS Import
+  * DANOS Import master
 
- -- Vyatta Package Maintainers <DL-vyatta-help@att.com>  Thu, 31 Oct 2019 17:41:39 -0400
+ -- Vyatta Package Maintainers <DL-vyatta-help@att.com>  Thu, 31 Oct 2019 17:39:43 -0400
 

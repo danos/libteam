@@ -1,0 +1,155 @@
+--- a/teamd/teamd_lw_vplane.c
++++ b/teamd/teamd_lw_vplane.c
+@@ -39,49 +39,56 @@ struct lw_vplane_event {
+ 	bool valid;
+ };
+ 
+-static int lw_vplane_link_state_change(struct teamd_context *ctx, char *name,
++static int lw_vplane_link_update(struct teamd_context *ctx,
++				       struct vplane_link *link,
+ 				       bool link_up)
+ {
+-	struct vplane_link *link;
++	struct teamd_port *tdport = link->common.tdport;
+ 	struct ethtool_cmd ecmd;
+ 	struct ifreq ifr;
+ 
+-	LIST_FOREACH(link, &all_links, next) {
+-		if (!strcmp(link->name, name)) {
+-			teamd_log_info("vplane: link <%s> went %s.", name,
+-					link_up ? "up" : "down");
+-			struct teamd_port *tdport = link->common.tdport;
+-
+-			memset(&ifr, 0, sizeof(ifr));
+-			strncpy(ifr.ifr_name, link->name, IFNAMSIZ);
+-			ifr.ifr_data = &ecmd;
+-			ecmd.cmd = ETHTOOL_GSET;
+-			if (ioctl(udp_fd, SIOCETHTOOL, &ifr)) {
+-				teamd_log_err("vplane: unable to get ethtool settings");
+-				return -errno;
+-			}
+-
+-			link->speed = ethtool_cmd_speed(&ecmd);
+-			link->duplex = ecmd.duplex;
+-			link->up = link_up;
+-
+-			if (team_get_option(ctx->th, "np", "enabled", tdport->ifindex) == NULL) {
+-				teamd_log_dbg("%s: options list pending for %s",
+-					      __func__, tdport->ifname);
+-				link->optlist_pending = true;
+-				return 0;
+-			}
++	teamd_log_info("vplane: link <%s> went %s.", link->name,
++		       link_up ? "up" : "down");
+ 
+-			if (link->optlist_pending) {
+-				teamd_log_dbg("%s: options list pending clear",
+-					      __func__);
+-			}
+-			link->optlist_pending = false;
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, link->name, IFNAMSIZ);
++	ifr.ifr_data = &ecmd;
++	ecmd.cmd = ETHTOOL_GSET;
++	if (ioctl(udp_fd, SIOCETHTOOL, &ifr)) {
++		teamd_log_err("vplane: unable to get ethtool settings");
++		return -errno;
++	}
+ 
+-			return teamd_link_watch_check_link_up(ctx, tdport,
+-				&link->common, link_up);
+-		}
++	link->speed = ethtool_cmd_speed(&ecmd);
++	link->duplex = ecmd.duplex;
++	link->up = link_up;
++
++	if (team_get_option(ctx->th, "np", "enabled", tdport->ifindex) == NULL) {
++		teamd_log_dbg("%s: options list pending for %s",
++			      __func__, tdport->ifname);
++		link->optlist_pending = true;
++		return 0;
+ 	}
++
++	if (link->optlist_pending) {
++		teamd_log_dbg("%s: options list pending clear",
++			      __func__);
++	}
++	link->optlist_pending = false;
++
++	return teamd_link_watch_check_link_up(ctx, tdport,
++					      &link->common, link_up);
++}
++
++static int lw_vplane_link_state_change(struct teamd_context *ctx, char *name,
++				       bool link_up)
++{
++	struct vplane_link *link;
++
++	LIST_FOREACH(link, &all_links, next)
++		if (!strcmp(link->name, name))
++			return lw_vplane_link_update(ctx, link, link_up);
++
+ 	return 0;
+ }
+ 
+@@ -190,15 +197,58 @@ static int lw_vplane_enabled_option_chan
+ 			teamd_log_dbg("%s: %s lsc pending clear",
+ 				      __func__, tdport->ifname);
+ 			link->optlist_pending = false;
+-			return lw_vplane_link_state_change(ctx, link->name,
+-							   link->up);
++			return lw_vplane_link_update(ctx, link, link->up);
+ 		}
+ 	}
+ 
+         return 0;
+ }
+ 
++/*
++ * During the process of adding the first link to a bundle it is
++ * possible to miss the initial set of netlink reports produced by the
++ * controller. Essentially by the time the ZMQ connection to the
++ * controller has been established (lw_vplane_port_added()) and
++ * depending on the timing present within the controller, we may not
++ * see the message indicating that the link is up.
++ *
++ * Monitor the bundle link state and when it is marked Up as a result
++ * of the first link being activated, update the "published" state of
++ * that link.
++ */
++static int lw_vplane_master_link_changed(struct teamd_context *ctx,
++					 void *priv)
++{
++	struct team_ifinfo *ifinfo = ctx->ifinfo;
++	struct teamd_port *tdport;
++	struct vplane_link *link;
++	uint32_t ifi_flags;
++	uint32_t ifi_up = IFF_UP|IFF_RUNNING;
++
++	teamd_log_dbg("vplane: %s ifi_flags %#x (enabled %d) port count %d",
++		      team_get_ifinfo_ifname(ifinfo),
++		      team_get_ifinfo_ifi_flags(ifinfo),
++		      ctx->enabled, ctx->port_obj_list_count);
++
++	if (!ctx->enabled || (ctx->port_obj_list_count != 1))
++		return 0;
++
++	tdport = teamd_get_next_tdport(ctx, NULL);
++	TEAMD_BUG_ON(tdport == NULL);
++
++	ifi_flags = team_get_ifinfo_ifi_flags(tdport->team_ifinfo);
++	if ((ifi_flags & ifi_up) != ifi_up)
++		return 0;
++
++	LIST_FOREACH(link, &all_links, next)
++		if ((strcmp(link->name, tdport->ifname) == 0) &&
++		    !link->up)
++			return lw_vplane_link_update(ctx, link, true);
++	return 0;
++}
++
+ static const struct teamd_event_watch_ops lw_vplane_option_watch_ops = {
++	.link_changed = lw_vplane_master_link_changed,
+ 	.option_changed = lw_vplane_enabled_option_changed,
+ 	.option_changed_match_name = "enabled",
+ };
