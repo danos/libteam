@@ -1,6 +1,13 @@
 --- a/teamd/teamd_lw_vplane.c
 +++ b/teamd/teamd_lw_vplane.c
-@@ -39,49 +39,56 @@ struct lw_vplane_event {
+@@ -1,4 +1,6 @@
+ #include <netlink/msg.h>
++#include <netlink/cli/utils.h>
++#include <netlink/cli/link.h>
+ #include <linux/if_link.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/ethtool.h>
+@@ -39,49 +41,56 @@ struct lw_vplane_event {
  	bool valid;
  };
  
@@ -92,7 +99,7 @@
  	return 0;
  }
  
-@@ -190,15 +197,58 @@ static int lw_vplane_enabled_option_chan
+@@ -190,15 +199,107 @@ static int lw_vplane_enabled_option_chan
  			teamd_log_dbg("%s: %s lsc pending clear",
  				      __func__, tdport->ifname);
  			link->optlist_pending = false;
@@ -105,6 +112,40 @@
          return 0;
  }
  
++static uint32_t kernel_get_ifi_flags(uint32_t ifindex)
++{
++	struct rtnl_link *link = NULL;
++	struct nl_sock *sock;
++	uint32_t flags = 0;
++	int err;
++
++	sock = nl_socket_alloc();
++	if (sock == NULL) {
++		teamd_log_err("%s() nl_socket_alloc() failed", __func__);
++		return 0;
++	}
++
++	err = nl_cli_connect(sock, NETLINK_ROUTE);
++	if (err < 0) {
++		teamd_log_err("%s() nl_cli_connect(): %s", __func__,
++			      strerror(-err));
++		goto exit;
++	}
++	err = rtnl_link_get_kernel(sock, ifindex, NULL, &link);
++	if (err < 0) {
++		teamd_log_err("%s() rtnl_link_get_kernel(%d): %s",
++			      __func__, ifindex, strerror(-err));
++		goto exit;
++	}
++
++	flags = rtnl_link_get_flags(link);
++
++exit:
++	rtnl_link_put(link);
++	nl_socket_free(sock);
++	return flags;
++}
++
 +/*
 + * During the process of adding the first link to a bundle it is
 + * possible to miss the initial set of netlink reports produced by the
@@ -137,7 +178,22 @@
 +	tdport = teamd_get_next_tdport(ctx, NULL);
 +	TEAMD_BUG_ON(tdport == NULL);
 +
++	/*
++	 * Just very occasionally the timing is such that the bundle
++	 * is reported as Up & Running, yet this first link is
++	 * recorded only as Up. The standard TD port update is
++	 * typically the next event to be processed.
++	 *
++	 * Query the kernel to get the actual state of the link.
++	 */
 +	ifi_flags = team_get_ifinfo_ifi_flags(tdport->team_ifinfo);
++	if ((ifi_flags & ifi_up) != ifi_up)
++		ifi_flags = kernel_get_ifi_flags(tdport->ifindex);
++
++	teamd_log_dbg("vplane: %s ifi_flags %#x (up %d)",
++		      tdport->ifname, ifi_flags,
++		      (ifi_flags & ifi_up) == ifi_up);
++
 +	if ((ifi_flags & ifi_up) != ifi_up)
 +		return 0;
 +
@@ -153,3 +209,14 @@
  	.option_changed = lw_vplane_enabled_option_changed,
  	.option_changed_match_name = "enabled",
  };
+--- a/teamd/teamd_events.c
++++ b/teamd/teamd_events.c
+@@ -191,7 +191,7 @@ int teamd_event_ifinfo_ifi_flags_changed
+ 	uint32_t ifi_flags = team_get_ifinfo_ifi_flags(ifinfo);
+ 	int err;
+ 
+-	teamd_log_dbg("%s: ifi_flags changed %d",
++	teamd_log_dbg("%s: ifi_flags changed %#x",
+ 		      team_get_ifinfo_ifname(ifinfo), ifi_flags);
+ 
+ 	if (ctx->ifinfo == ifinfo)
