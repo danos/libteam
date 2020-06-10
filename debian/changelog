@@ -1,3 +1,13 @@
+libteam (1.11-1vyatta23) unstable; urgency=medium
+
+  [ Mark Gillott ]
+  * teamd: use kernel port state when updating the published link state
+    (Fixes: VRVDR-50619)
+
+  [ Charles (Chas) Williams ]
+
+ -- Charles (Chas) Williams <ciwillia@vyatta.att-mail.com>  Wed, 10 Jun 2020 11:51:38 -0400
+
 libteam (1.11-1vyatta22) unstable; urgency=medium
 
   * DANOS Import master
